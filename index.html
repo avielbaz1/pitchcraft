@@ -203,6 +203,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
         <span class="np-hz" id="np-hz">147Hz</span>
         <span class="np-cents" id="np-cents">+0¢</span>
         <button class="np-snap-btn" id="np-snap">snap</button>
+        <button class="np-snap-btn" id="np-merge" title="Merge with next note">merge→</button>
         <button class="np-close" id="np-close">✕</button>
       </div>
       <div class="np-row">
@@ -521,23 +522,26 @@ function analyzeBuffer(buf){
     }
   }
 
-  // Pass 5: merge same-semitone blobs with gap < 300ms
-  if(notes.length>1){
-    const merged=[];
-    let cur={...notes[0]};
-    for(let n=1;n<notes.length;n++){
-      const next=notes[n];
-      const gap=next.startTime-cur.endTime;
-      const sameSemitone=Math.round(cur.midi)===Math.round(next.midi);
-      if(gap<0.4&&sameSemitone){
-        cur.endTime=next.endTime; cur.endSample=next.endSample;
-        const avg=(cur.freq+next.freq)/2;
-        cur.freq=avg; cur.midi=f2midi(avg); cur.midiOrig=cur.midi;
-        cur.cents=Math.round((cur.midi-snapMidi(cur.midi))*100);
-      } else { merged.push(cur); cur={...next}; }
+  // Pass 5: merge blobs of same note (within 1 semitone, gap < 500ms)
+  // Run twice to catch chains of fragments
+  for(let pass=0;pass<2;pass++){
+    if(notes.length>1){
+      const merged=[];
+      let cur={...notes[0]};
+      for(let n=1;n<notes.length;n++){
+        const next=notes[n];
+        const gap=next.startTime-cur.endTime;
+        const semDiff=Math.abs(cur.midi-next.midi);
+        if(gap<0.5&&semDiff<=1.0){
+          cur.endTime=next.endTime; cur.endSample=next.endSample;
+          const avg=(cur.freq+next.freq)/2;
+          cur.freq=avg; cur.midi=f2midi(avg); cur.midiOrig=cur.midi;
+          cur.cents=Math.round((cur.midi-snapMidi(cur.midi))*100);
+        } else { merged.push(cur); cur={...next}; }
+      }
+      merged.push(cur);
+      notes=merged;
     }
-    merged.push(cur);
-    notes=merged;
   }
 }
 
@@ -1014,7 +1018,24 @@ document.getElementById('np-vib-up').onclick=()=>{
   selectedNote.vibratoReduction=Math.min(100,(selectedNote.vibratoReduction||0)+10);
   updateNotePanel(selectedNote);rebuildCorrectedBuffer();
 };
-document.getElementById('np-snap').onclick=()=>{
+document.getElementById('np-merge').onclick=()=>{
+  if(!selectedNote)return;
+  const idx=notes.indexOf(selectedNote);
+  if(idx<0||idx>=notes.length-1)return;
+  const next=notes[idx+1];
+  // merge selectedNote with next note
+  const avg=(selectedNote.freq+next.freq)/2;
+  selectedNote.endTime=next.endTime;
+  selectedNote.endSample=next.endSample;
+  selectedNote.freq=avg;
+  selectedNote.midi=f2midi(avg);
+  selectedNote.midiOrig=selectedNote.midi;
+  selectedNote.cents=Math.round((selectedNote.midi-snapMidi(selectedNote.midi))*100);
+  notes.splice(idx+1,1);
+  updateNotePanel(selectedNote);
+  rebuildCorrectedBuffer();
+  drawEditor();
+};
   if(!selectedNote)return;
   selectedNote.tuneOffset=snapMidi(selectedNote.midiOrig)-selectedNote.midiOrig;
   updateNoteCents(selectedNote);
