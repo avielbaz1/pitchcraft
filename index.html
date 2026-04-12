@@ -185,6 +185,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
       <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16"/></svg>
     </button>
     <button class="bypass-btn" id="bypass-btn">BYPASS</button>
+    <button class="t-btn" id="undo-btn" title="Undo" disabled>
+      <svg viewBox="0 0 24 24"><path d="M3 10h10c3.9 0 7 3.1 7 7v1M3 10l5-5M3 10l5 5" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+    </button>
     <span class="playhead-time" id="ph-time">0:00.0</span>
   </div>
 
@@ -204,6 +207,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
         <span class="np-cents" id="np-cents">+0¢</span>
         <button class="np-snap-btn" id="np-snap">snap</button>
         <button class="np-snap-btn" id="np-merge" title="Merge with next note">merge→</button>
+        <button class="np-snap-btn" id="np-split" title="Split note in half">split</button>
         <button class="np-close" id="np-close">✕</button>
       </div>
       <div class="np-row">
@@ -268,8 +272,10 @@ function cents(midi){return Math.round((midi-snapMidi(midi))*100);}
 function detectPitch(buf,sr){
   const n=buf.length;
   let rms=0;for(let i=0;i<n;i++)rms+=buf[i]*buf[i];rms=Math.sqrt(rms/n);
-  if(rms<0.005)return{freq:-1,rms};
-  const minP=Math.floor(sr/1400),maxP=Math.ceil(sr/60);
+  if(rms<0.003)return{freq:-1,rms};
+
+  // Focus on typical singing voice range: 80Hz - 800Hz
+  const minP=Math.floor(sr/800),maxP=Math.ceil(sr/80);
   let bestR=-1,bestL=-1;
   for(let lag=minP;lag<=maxP&&lag<n/2;lag++){
     let num=0,d1=0,d2=0;
@@ -278,13 +284,28 @@ function detectPitch(buf,sr){
     if(r>bestR){bestR=r;bestL=lag;}
   }
   if(bestR<0.45||bestL<1)return{freq:-1,rms};
+
   // parabolic refinement
   if(bestL>minP&&bestL<n/2-1){
     const r0=getR(buf,n,bestL-1),r1=bestR,r2=getR(buf,n,bestL+1);
     const d=2*r1-r0-r2;if(d>0)bestL+=0.5*(r0-r2)/d;
   }
-  const freq=sr/bestL;
-  return{freq:(freq>60&&freq<1400)?freq:-1,rms};
+
+  let freq=sr/bestL;
+
+  // Octave correction: check if double frequency has strong correlation
+  // If so, we detected the sub-harmonic — correct upward
+  if(freq>80&&freq<400){
+    const halfLag=bestL/2;
+    const intHalfLag=Math.round(halfLag);
+    if(intHalfLag>=minP){
+      const rDouble=getR(buf,n,intHalfLag);
+      // if octave-up correlation is nearly as strong, prefer the higher pitch
+      if(rDouble>bestR*0.85) freq*=2;
+    }
+  }
+
+  return{freq:(freq>80&&freq<800)?freq:-1,rms};
 }
 function getR(buf,n,lag){
   let num=0,d1=0,d2=0;
@@ -427,7 +448,27 @@ function cloneBuffer(src){
 }
 
 // ══ NOTE ANALYSIS ════════════════════════════════════════════
-let notes=[];// [{startSample,endSample,startTime,endTime,freq,midi,midiOrig,cents,selected,tuneOffset}]
+let notes=[];
+let undoStack=[];// array of notes snapshots
+
+function pushUndo(){
+  // deep clone current notes state
+  undoStack.push(notes.map(n=>({...n})));
+  if(undoStack.length>30) undoStack.shift();// max 30 steps
+  document.getElementById('undo-btn').disabled=false;
+}
+
+function undo(){
+  if(!undoStack.length)return;
+  notes=undoStack.pop();
+  if(!undoStack.length) document.getElementById('undo-btn').disabled=true;
+  // deselect all
+  notes.forEach(n=>n.selected=false);
+  selectedNote=null;
+  hideNotePanel();
+  rebuildCorrectedBuffer();
+  drawEditor();
+}
 
 function analyzeBuffer(buf){
   const sr=buf.sampleRate;
@@ -443,8 +484,7 @@ function analyzeBuffer(buf){
       samplePos:i, t:i/sr,
       freq:freq>0?freq:0,
       midi:freq>0?f2midi(freq):0,
-      voiced:freq>0&&rms>0.003, rms
-    });
+      voiced:freq>0&&rms>0.003, rms    });
   }
 
   // Pass 2: median smooth over 7 frames to kill vibrato/noise
@@ -464,8 +504,8 @@ function analyzeBuffer(buf){
 
   // Pass 4: segment into notes
   notes=[];
-  const MIN_FRAMES=Math.ceil(120/(HOP/sr*1000)); // 120ms minimum
-  const SPLIT_CONFIRM=4;
+  const MIN_FRAMES=Math.ceil(150/(HOP/sr*1000)); // 150ms minimum — filters short glide fragments
+  const SPLIT_CONFIRM=6; // need 6 frames on new pitch to confirm split (~75ms at HOP=512)
   let i=0;
 
   while(i<frames.length){
@@ -483,8 +523,8 @@ function analyzeBuffer(buf){
         }
         if(gap<4){j+=gap-1;continue;} else break;
       }
-      // allow ±1 semitone — catches natural pitch wobble within a note
-      if(Math.abs(frames[j].semitone-targetSemitone)<=1){
+      // exact semitone match only — prevents adjacent semitones (E/F, B/C) from merging
+      if(frames[j].semitone===targetSemitone){
         end=j; freqSum+=frames[j].freq; count++;
       } else {
         const semDiff=Math.abs(frames[j].semitone-targetSemitone);
@@ -798,6 +838,7 @@ document.getElementById('t-play').onclick=()=>{
 document.getElementById('t-stop').onclick=()=>{
   stopAudio();
 };
+document.getElementById('undo-btn').onclick=()=>undo();
 document.getElementById('bypass-btn').onclick=()=>{
   bypassMode=!bypassMode;
   document.getElementById('bypass-btn').classList.toggle('on',bypassMode);
@@ -983,7 +1024,7 @@ npPitchSl.oninput=()=>{
   updateNotePanel(selectedNote);
   drawEditor();
 };
-npPitchSl.onchange=()=>{ if(selectedNote){rebuildCorrectedBuffer();refreshNoteList();} };
+npPitchSl.onchange=()=>{ if(selectedNote){pushUndo();rebuildCorrectedBuffer();refreshNoteList();} };
 
 // vibrato slider input
 npVibSl.oninput=()=>{
@@ -1022,6 +1063,7 @@ document.getElementById('np-merge').onclick=()=>{
   if(!selectedNote)return;
   const idx=notes.indexOf(selectedNote);
   if(idx<0||idx>=notes.length-1)return;
+  pushUndo();
   const next=notes[idx+1];
   // merge selectedNote with next note
   const avg=(selectedNote.freq+next.freq)/2;
@@ -1036,7 +1078,33 @@ document.getElementById('np-merge').onclick=()=>{
   rebuildCorrectedBuffer();
   drawEditor();
 };
+document.getElementById('np-split').onclick=()=>{
   if(!selectedNote)return;
+  const idx=notes.indexOf(selectedNote);
+  if(idx<0)return;
+  pushUndo();
+  const n=selectedNote;
+  const midTime=(n.startTime+n.endTime)/2;
+  const midSample=Math.floor((n.startSample+n.endSample)/2);
+  // first half
+  const first={...n,endTime:midTime,endSample:midSample,selected:false};
+  // second half — shift midi up by 1 semitone as a hint it's a different note
+  const secondMidi=n.midi+1;
+  const second={...n,
+    startTime:midTime,startSample:midSample,
+    midi:secondMidi,midiOrig:secondMidi,freq:midi2f(secondMidi),
+    cents:Math.round((secondMidi-snapMidi(secondMidi))*100),
+    tuneOffset:0,selected:true
+  };
+  notes.splice(idx,1,first,second);
+  selectedNote=second;
+  showNotePanel(second);
+  rebuildCorrectedBuffer();
+  drawEditor();
+};
+document.getElementById('np-snap').onclick=()=>{
+  if(!selectedNote)return;
+  pushUndo();
   selectedNote.tuneOffset=snapMidi(selectedNote.midiOrig)-selectedNote.midiOrig;
   updateNoteCents(selectedNote);
   updateNotePanel(selectedNote);
@@ -1053,6 +1121,7 @@ const qVal=document.getElementById('q-val');
 qSlider.oninput=()=>{ qVal.textContent=qSlider.value+'%'; };
 
 document.getElementById('apply-btn').onclick=()=>{
+  pushUndo();
   const amount=parseInt(qSlider.value)/100;
   notes.forEach(n=>{
     const snapped=snapMidi(n.midiOrig);
