@@ -431,170 +431,111 @@ let notes=[];// [{startSample,endSample,startTime,endTime,freq,midi,midiOrig,cen
 function analyzeBuffer(buf){
   const sr=buf.sampleRate;
   const data=buf.getChannelData(0);
-  const WIN=2048,HOP=256; // smaller hop = finer time resolution
+  const WIN=2048,HOP=128;
   const frames=[];
 
-  // Step 1: detect pitch for every hop
+  // Pass 1: detect pitch at every hop
   for(let i=0;i+WIN<data.length;i+=HOP){
     const sl=data.slice(i,i+WIN);
     const{freq,rms}=detectPitch(sl,sr);
     frames.push({
-      t:i/sr,
-      samplePos:i,
+      samplePos:i, t:i/sr,
       freq:freq>0?freq:0,
-      rms,
-      voiced:freq>0&&rms>0.003
+      midi:freq>0?f2midi(freq):0,
+      voiced:freq>0&&rms>0.003, rms
     });
   }
 
-  // Step 2: smooth pitch with a 5-frame median (kills vibrato/noise)
-  const smoothed=frames.map(f=>f.freq);
-  for(let i=2;i<frames.length-2;i++){
+  // Pass 2: median smooth over 7 frames to kill vibrato/noise
+  for(let i=3;i<frames.length-3;i++){
     if(!frames[i].voiced) continue;
-    const win=[smoothed[i-2],smoothed[i-1],smoothed[i],smoothed[i+1],smoothed[i+2]]
-      .filter(v=>v>0);
-    if(win.length>=3){
-      win.sort((a,b)=>a-b);
-      smoothed[i]=win[Math.floor(win.length/2)];
+    const vals=[];
+    for(let k=i-3;k<=i+3;k++) if(frames[k].voiced) vals.push(frames[k].midi);
+    if(vals.length>=3){
+      vals.sort((a,b)=>a-b);
+      frames[i].midi=vals[Math.floor(vals.length/2)];
+      frames[i].freq=midi2f(frames[i].midi);
     }
   }
 
-  // Step 3: convert to MIDI semitones for easier comparison
-  const midiFrames=smoothed.map((f,i)=>({
-    t:frames[i].t,
-    samplePos:frames[i].samplePos,
-    midi:f>0?f2midi(f):0,
-    voiced:frames[i].voiced,
-    rms:frames[i].rms
-  }));
+  // Pass 3: snap each frame to nearest semitone integer
+  frames.forEach(f=>{ if(f.voiced) f.semitone=Math.round(f.midi); });
 
-  // Step 4: find STABLE REGIONS
-  // A stable region = consecutive voiced frames where pitch stays
-  // within STABLE_WINDOW semitones of the region's median
-  const STABLE_WINDOW=1.5;    // semitones tolerance within a note
-  const MIN_STABLE_MS=80;     // minimum note duration
-  const MIN_STABLE_FRAMES=Math.ceil(MIN_STABLE_MS/(HOP/sr*1000));
-  const SPLIT_SEMITONES=1.8;  // pitch must move this far from seed to start new note
-  const SPLIT_CONFIRM=4;      // frames that must agree on new pitch before splitting
-
+  // Pass 4: segment into notes
   notes=[];
-
+  const MIN_FRAMES=Math.ceil(80/(HOP/sr*1000)); // 80ms minimum
+  const SPLIT_CONFIRM=3; // fewer frames needed to confirm split
   let i=0;
-  while(i<midiFrames.length){
-    if(!midiFrames[i].voiced){i++;continue;}
 
-    // try to grow a stable region starting at i
-    let regionEnd=i;
-    // use median of first 5 voiced frames as the region's target pitch
-    const seedFrames=[];
-    for(let k=i;k<Math.min(i+10,midiFrames.length)&&seedFrames.length<5;k++){
-      if(midiFrames[k].voiced) seedFrames.push(midiFrames[k].midi);
-    }
-    const seedMidi=seedFrames.length>0?seedFrames.sort((a,b)=>a-b)[Math.floor(seedFrames.length/2)]:midiFrames[i].midi;
+  while(i<frames.length){
+    if(!frames[i].voiced){i++;continue;}
 
-    for(let j=i+1;j<midiFrames.length;j++){
-      if(!midiFrames[j].voiced){
-        let gapEnd=j;
-        while(gapEnd<midiFrames.length&&!midiFrames[gapEnd].voiced) gapEnd++;
-        if(gapEnd-j>6) break;
-        j=gapEnd-1; continue;
+    const targetSemitone=frames[i].semitone;
+    let end=i, freqSum=frames[i].freq, count=1;
+
+    for(let j=i+1;j<frames.length;j++){
+      if(!frames[j].voiced){
+        // bridge short silence < 4 frames (~40ms)
+        let gap=0;
+        for(let g=j;g<Math.min(j+4,frames.length);g++){
+          if(!frames[g].voiced) gap++; else break;
+        }
+        if(gap<4){j+=gap-1;continue;} else break;
       }
-      const diff=Math.abs(midiFrames[j].midi-seedMidi);
-      if(diff<=STABLE_WINDOW){
-        // still on same note
-        regionEnd=j;
+      // strict: only ±0 semitone tolerance (exact same semitone)
+      if(frames[j].semitone===targetSemitone){
+        end=j; freqSum+=frames[j].freq; count++;
       } else {
-        // pitch has moved away — check if SPLIT_CONFIRM consecutive frames
-        // all agree on a new pitch (rules out vibrato/glide wobble)
-        let confirmCount=0;
-        let newPitchSum=0;
-        for(let k=j;k<Math.min(j+SPLIT_CONFIRM+2,midiFrames.length);k++){
-          if(midiFrames[k].voiced&&Math.abs(midiFrames[k].midi-seedMidi)>STABLE_WINDOW){
-            confirmCount++;
-            newPitchSum+=midiFrames[k].midi;
-          }
+        // check if new semitone confirmed by SPLIT_CONFIRM consecutive frames
+        const newTarget=frames[j].semitone;
+        let confirmed=0;
+        for(let k=j;k<Math.min(j+SPLIT_CONFIRM+1,frames.length);k++){
+          if(frames[k].voiced&&frames[k].semitone===newTarget) confirmed++;
         }
-        if(confirmCount>=SPLIT_CONFIRM){
-          // confirmed new note — stop this region here
-          break;
-        } else {
-          // not confirmed — vibrato or glide wobble, keep going
-          regionEnd=j;
-        }
+        if(confirmed>=SPLIT_CONFIRM) break; // real note change — split here
+        // else: passing tone/vibrato — skip without adding to note
       }
     }
 
-    const regionLen=regionEnd-i+1;
-    if(regionLen>=MIN_STABLE_FRAMES){
-      // valid note — collect freqs for this region
-      const regionFreqs=[];
-      for(let k=i;k<=regionEnd;k++){
-        if(midiFrames[k].voiced&&smoothed[k]>0) regionFreqs.push(smoothed[k]);
-      }
-      if(regionFreqs.length>0){
-        saveNote(
-          regionFreqs,
-          i,regionEnd,
-          sr,WIN,HOP,
-          frames[i].samplePos,
-          frames[regionEnd].samplePos+WIN
-        );
-      }
-      i=regionEnd+1;
+    // only save notes that are long enough
+    if(end-i+1>=MIN_FRAMES){
+      const avgFreq=freqSum/count;
+      const midi=f2midi(avgFreq);
+      const snapped=snapMidi(midi);
+      notes.push({
+        startSample:frames[i].samplePos,
+        endSample:Math.min(frames[end].samplePos+WIN,buf.length),
+        startTime:frames[i].t,
+        endTime:frames[end].t+WIN/sr,
+        freq:avgFreq, midi, midiOrig:midi,
+        tuneOffset:0,
+        cents:Math.round((midi-snapped)*100),
+        selected:false, vibratoReduction:0
+      });
+      i=end+1;
     } else {
-      // too short — could be glide/transition, skip ahead
-      i++;
+      i++; // too short — skip (removes ghost blobs from glides)
     }
   }
-  // Step 5: merge nearby blobs of the same note (within 1.5 semitones + 200ms gap)
+
+  // Pass 5: merge same-semitone blobs with gap < 300ms
   if(notes.length>1){
     const merged=[];
-    let cur=notes[0];
-    for(let i=1;i<notes.length;i++){
-      const next=notes[i];
+    let cur={...notes[0]};
+    for(let n=1;n<notes.length;n++){
+      const next=notes[n];
       const gap=next.startTime-cur.endTime;
-      const semDiff=Math.abs(cur.midi-next.midi);
-      if(gap<0.2&&semDiff<1.5){
-        // merge into cur
-        const totalFreqs=[cur.freq,next.freq];
-        const avgFreq=totalFreqs.reduce((a,b)=>a+b)/totalFreqs.length;
-        cur={...cur,
-          endTime:next.endTime,
-          endSample:next.endSample,
-          freq:avgFreq,
-          midi:f2midi(avgFreq),
-          midiOrig:f2midi(avgFreq),
-          cents:Math.round((f2midi(avgFreq)-snapMidi(f2midi(avgFreq)))*100)
-        };
-      } else {
-        merged.push(cur);
-        cur=next;
-      }
+      const sameSemitone=Math.round(cur.midi)===Math.round(next.midi);
+      if(gap<0.3&&sameSemitone){
+        cur.endTime=next.endTime; cur.endSample=next.endSample;
+        const avg=(cur.freq+next.freq)/2;
+        cur.freq=avg; cur.midi=f2midi(avg); cur.midiOrig=cur.midi;
+        cur.cents=Math.round((cur.midi-snapMidi(cur.midi))*100);
+      } else { merged.push(cur); cur={...next}; }
     }
     merged.push(cur);
     notes=merged;
   }
-}freqs,startFrame,endFrame,sr,WIN,HOP,startSample,endSample){
-  const avgFreq=freqs.reduce((a,b)=>a+b)/freqs.length;
-  const midi=f2midi(avgFreq);
-  const snapped=snapMidi(midi);
-  const c=Math.round((midi-snapped)*100);
-  // use actual sample positions if provided, else compute from frame index
-  const ss=startSample!==undefined?startSample:startFrame*HOP;
-  const es=endSample!==undefined?endSample:endFrame*HOP+WIN;
-  notes.push({
-    startSample:ss,
-    endSample:Math.min(es,sr*300),// safety cap
-    startTime:ss/sr,
-    endTime:es/sr,
-    freq:avgFreq,
-    midi,
-    midiOrig:midi,
-    tuneOffset:0,
-    cents:c,
-    selected:false,
-    vibratoReduction:0
-  });
 }
 
 // ══ EDITOR CANVAS ════════════════════════════════════════════
