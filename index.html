@@ -431,7 +431,7 @@ let notes=[];// [{startSample,endSample,startTime,endTime,freq,midi,midiOrig,cen
 function analyzeBuffer(buf){
   const sr=buf.sampleRate;
   const data=buf.getChannelData(0);
-  const WIN=2048,HOP=128;
+  const WIN=2048,HOP=512;
   const frames=[];
 
   // Pass 1: detect pitch at every hop
@@ -463,8 +463,8 @@ function analyzeBuffer(buf){
 
   // Pass 4: segment into notes
   notes=[];
-  const MIN_FRAMES=Math.ceil(80/(HOP/sr*1000)); // 80ms minimum
-  const SPLIT_CONFIRM=3; // fewer frames needed to confirm split
+  const MIN_FRAMES=Math.ceil(120/(HOP/sr*1000)); // 120ms minimum
+  const SPLIT_CONFIRM=4;
   let i=0;
 
   while(i<frames.length){
@@ -482,18 +482,21 @@ function analyzeBuffer(buf){
         }
         if(gap<4){j+=gap-1;continue;} else break;
       }
-      // strict: only ±0 semitone tolerance (exact same semitone)
-      if(frames[j].semitone===targetSemitone){
+      // allow ±1 semitone — catches natural pitch wobble within a note
+      if(Math.abs(frames[j].semitone-targetSemitone)<=1){
         end=j; freqSum+=frames[j].freq; count++;
       } else {
-        // check if new semitone confirmed by SPLIT_CONFIRM consecutive frames
+        const semDiff=Math.abs(frames[j].semitone-targetSemitone);
+        // large jump (2+ semitones) = always a new note, split immediately
+        if(semDiff>=2) break;
+        // small jump (exactly 1 semitone) = could be vibrato, need confirmation
         const newTarget=frames[j].semitone;
         let confirmed=0;
         for(let k=j;k<Math.min(j+SPLIT_CONFIRM+1,frames.length);k++){
           if(frames[k].voiced&&frames[k].semitone===newTarget) confirmed++;
         }
-        if(confirmed>=SPLIT_CONFIRM) break; // real note change — split here
-        // else: passing tone/vibrato — skip without adding to note
+        if(confirmed>=SPLIT_CONFIRM) break;
+        // else: vibrato passing tone — skip
       }
     }
 
@@ -526,7 +529,7 @@ function analyzeBuffer(buf){
       const next=notes[n];
       const gap=next.startTime-cur.endTime;
       const sameSemitone=Math.round(cur.midi)===Math.round(next.midi);
-      if(gap<0.3&&sameSemitone){
+      if(gap<0.4&&sameSemitone){
         cur.endTime=next.endTime; cur.endSample=next.endSample;
         const avg=(cur.freq+next.freq)/2;
         cur.freq=avg; cur.midi=f2midi(avg); cur.midiOrig=cur.midi;
