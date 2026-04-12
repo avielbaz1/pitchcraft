@@ -471,9 +471,11 @@ function analyzeBuffer(buf){
   // Step 4: find STABLE REGIONS
   // A stable region = consecutive voiced frames where pitch stays
   // within STABLE_WINDOW semitones of the region's median
-  const STABLE_WINDOW=2.2;    // semitones — wider to merge slight wobble within same note
-  const MIN_STABLE_MS=100;    // minimum 100ms — filters out tiny spurious detections
+  const STABLE_WINDOW=1.5;    // semitones tolerance within a note
+  const MIN_STABLE_MS=80;     // minimum note duration
   const MIN_STABLE_FRAMES=Math.ceil(MIN_STABLE_MS/(HOP/sr*1000));
+  const SPLIT_SEMITONES=1.8;  // pitch must move this far from seed to start new note
+  const SPLIT_CONFIRM=4;      // frames that must agree on new pitch before splitting
 
   notes=[];
 
@@ -492,16 +494,33 @@ function analyzeBuffer(buf){
 
     for(let j=i+1;j<midiFrames.length;j++){
       if(!midiFrames[j].voiced){
-        // short unvoiced gap (<6 frames) — allow
         let gapEnd=j;
         while(gapEnd<midiFrames.length&&!midiFrames[gapEnd].voiced) gapEnd++;
         if(gapEnd-j>6) break;
         j=gapEnd-1; continue;
       }
-      if(Math.abs(midiFrames[j].midi-seedMidi)<=STABLE_WINDOW){
+      const diff=Math.abs(midiFrames[j].midi-seedMidi);
+      if(diff<=STABLE_WINDOW){
+        // still on same note
         regionEnd=j;
       } else {
-        break;
+        // pitch has moved away — check if SPLIT_CONFIRM consecutive frames
+        // all agree on a new pitch (rules out vibrato/glide wobble)
+        let confirmCount=0;
+        let newPitchSum=0;
+        for(let k=j;k<Math.min(j+SPLIT_CONFIRM+2,midiFrames.length);k++){
+          if(midiFrames[k].voiced&&Math.abs(midiFrames[k].midi-seedMidi)>STABLE_WINDOW){
+            confirmCount++;
+            newPitchSum+=midiFrames[k].midi;
+          }
+        }
+        if(confirmCount>=SPLIT_CONFIRM){
+          // confirmed new note — stop this region here
+          break;
+        } else {
+          // not confirmed — vibrato or glide wobble, keep going
+          regionEnd=j;
+        }
       }
     }
 
