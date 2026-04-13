@@ -901,73 +901,76 @@ function stopAudio(){
 
 // ══ NOTE INTERACTION — TAP TO SELECT ═════════════════════════
 let tapStartX=0,tapStartY=0,tapStartTime=0,tapMoved=false;
-let lastTapTime=0,lastTapX2=0,lastTapY2=0;
-const DOUBLE_TAP_MS=350, DOUBLE_TAP_PX=30;
+let lastTapTime=0,lastTapClientX=0,lastTapClientY=0;
+let singleTapTimer=null;
+const DOUBLE_TAP_MS=300,DOUBLE_TAP_PX=30;
+
+function getCanvasXY(clientX,clientY){
+  const rect=edScroll.getBoundingClientRect();
+  return{x:(clientX-rect.left)+edScroll.scrollLeft,y:(clientY-rect.top)+edScroll.scrollTop};
+}
 
 edCanvas.addEventListener('touchstart',(e)=>{
   const t=e.touches[0];
-  tapStartX=t.clientX; tapStartY=t.clientY;
-  tapStartTime=Date.now(); tapMoved=false;
+  tapStartX=t.clientX;tapStartY=t.clientY;tapStartTime=Date.now();tapMoved=false;
 },{passive:true});
 
 edCanvas.addEventListener('touchmove',(e)=>{
   const t=e.touches[0];
-  if(Math.abs(t.clientX-tapStartX)>10||Math.abs(t.clientY-tapStartY)>10) tapMoved=true;
+  if(Math.abs(t.clientX-tapStartX)>10||Math.abs(t.clientY-tapStartY)>10)tapMoved=true;
 },{passive:true});
 
 edCanvas.addEventListener('touchend',(e)=>{
-  if(tapMoved) return;
-  if(Date.now()-tapStartTime>600) return;
+  if(tapMoved||Date.now()-tapStartTime>600)return;
   const ct=e.changedTouches[0];
-  const rect=edScroll.getBoundingClientRect();
-  const x=(ct.clientX-rect.left)+edScroll.scrollLeft;
-  const y=(ct.clientY-rect.top)+edScroll.scrollTop;
   const now=Date.now();
-  const isDouble=
-    (now-lastTapTime)<DOUBLE_TAP_MS&&
-    Math.abs(ct.clientX-lastTapX2)<DOUBLE_TAP_PX&&
-    Math.abs(ct.clientY-lastTapY2)<DOUBLE_TAP_PX;
-  lastTapTime=now; lastTapX2=ct.clientX; lastTapY2=ct.clientY;
-  handleTap(x,y,isDouble);
+  const isDouble=(now-lastTapTime)<DOUBLE_TAP_MS&&
+    Math.abs(ct.clientX-lastTapClientX)<DOUBLE_TAP_PX&&
+    Math.abs(ct.clientY-lastTapClientY)<DOUBLE_TAP_PX;
+  lastTapTime=now;lastTapClientX=ct.clientX;lastTapClientY=ct.clientY;
+  const{x,y}=getCanvasXY(ct.clientX,ct.clientY);
+  clearTimeout(singleTapTimer);
+  if(isDouble){
+    handleTap(x,y,true);
+  } else {
+    singleTapTimer=setTimeout(()=>handleTap(x,y,false),DOUBLE_TAP_MS+20);
+  }
 },{passive:true});
 
-// mouse: single click = tap, double click = double tap
-edCanvas.addEventListener('dblclick',(e)=>{
-  const rect=edScroll.getBoundingClientRect();
-  const x=(e.clientX-rect.left)+edScroll.scrollLeft;
-  const y=(e.clientY-rect.top)+edScroll.scrollTop;
-  handleTap(x,y,true);
-});
+// desktop — use only click, track double click manually (avoids click+dblclick double-fire)
 edCanvas.addEventListener('click',(e)=>{
-  const rect=edScroll.getBoundingClientRect();
-  const x=(e.clientX-rect.left)+edScroll.scrollLeft;
-  const y=(e.clientY-rect.top)+edScroll.scrollTop;
-  handleTap(x,y,false);
+  const now=Date.now();
+  const isDouble=(now-lastTapTime)<DOUBLE_TAP_MS&&
+    Math.abs(e.clientX-lastTapClientX)<DOUBLE_TAP_PX&&
+    Math.abs(e.clientY-lastTapClientY)<DOUBLE_TAP_PX;
+  lastTapTime=now;lastTapClientX=e.clientX;lastTapClientY=e.clientY;
+  const{x,y}=getCanvasXY(e.clientX,e.clientY);
+  clearTimeout(singleTapTimer);
+  if(isDouble){
+    handleTap(x,y,true);
+  } else {
+    singleTapTimer=setTimeout(()=>handleTap(x,y,false),DOUBLE_TAP_MS+20);
+  }
 });
 
 function handleTap(x,y,isDouble){
   const hit=hitTest(x,y);
   if(hit){
-    // tapped a note blob — select it (single or double both select)
     notes.forEach(n=>n.selected=false);
-    hit.selected=true; selectedNote=hit;
+    hit.selected=true;selectedNote=hit;
     showNotePanel(hit);
   } else {
-    // tapped empty area
     notes.forEach(n=>n.selected=false);
-    selectedNote=null; hideNotePanel();
-    // set locator position
+    selectedNote=null;hideNotePanel();
     if(originalBuffer){
       playOffset=Math.max(0,Math.min(xToTime(x),originalBuffer.duration));
       document.getElementById('ph-time').textContent=fmtTime(playOffset);
     }
     if(isDouble){
-      // double tap = play from locator
-      if(isPlaying) stopAudio();
+      if(isPlaying)stopAudio();
       playAudio();
     } else {
-      // single tap = stop if playing, just move locator if stopped
-      if(isPlaying) pauseAudio();
+      if(isPlaying)pauseAudio();
     }
   }
   drawEditor();
