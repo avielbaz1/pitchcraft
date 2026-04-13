@@ -921,24 +921,40 @@ edCanvas.addEventListener('touchmove',(e)=>{
 
 edCanvas.addEventListener('touchend',(e)=>{
   if(tapMoved||Date.now()-tapStartTime>700)return;
-  e.preventDefault(); // prevent ghost mouse click on Android
+  e.preventDefault();
+  e.stopPropagation();
   const ct=e.changedTouches[0];
   const now=Date.now();
-  const isDouble=(now-lastTapTime)<DOUBLE_TAP_MS&&
-    Math.abs(ct.clientX-lastTapClientX)<DOUBLE_TAP_PX&&
+  const timeDiff=now-lastTapTime;
+  const distOk=Math.abs(ct.clientX-lastTapClientX)<DOUBLE_TAP_PX&&
     Math.abs(ct.clientY-lastTapClientY)<DOUBLE_TAP_PX;
-  lastTapTime=now;lastTapClientX=ct.clientX;lastTapClientY=ct.clientY;
+  const isDouble=timeDiff<DOUBLE_TAP_MS&&timeDiff>50&&distOk;
+  if(isDouble){
+    lastTapTime=0; // reset after double tap
+  } else {
+    lastTapTime=now;
+    lastTapClientX=ct.clientX;lastTapClientY=ct.clientY;
+  }
   const{x,y}=getCanvasXY(ct.clientX,ct.clientY);
   handleTap(x,y,isDouble);
-},{passive:false}); // non-passive — lets preventDefault block ghost click
+},{passive:false});
 
-// desktop mouse only
+// desktop mouse only — ignored if touch already handled
+let lastTouchEndTime=0;
+edCanvas.addEventListener('touchend',()=>{lastTouchEndTime=Date.now();},{passive:true});
 edCanvas.addEventListener('click',(e)=>{
+  if(Date.now()-lastTouchEndTime<500)return; // skip ghost click after touch
   const now=Date.now();
-  const isDouble=(now-lastTapTime)<DOUBLE_TAP_MS&&
-    Math.abs(e.clientX-lastTapClientX)<DOUBLE_TAP_PX&&
+  const timeDiff=now-lastTapTime;
+  const distOk=Math.abs(e.clientX-lastTapClientX)<DOUBLE_TAP_PX&&
     Math.abs(e.clientY-lastTapClientY)<DOUBLE_TAP_PX;
-  lastTapTime=now;lastTapClientX=e.clientX;lastTapClientY=e.clientY;
+  const isDouble=timeDiff<DOUBLE_TAP_MS&&timeDiff>50&&distOk;
+  if(isDouble){
+    lastTapTime=0;
+  } else {
+    lastTapTime=now;
+    lastTapClientX=e.clientX;lastTapClientY=e.clientY;
+  }
   const{x,y}=getCanvasXY(e.clientX,e.clientY);
   handleTap(x,y,isDouble);
 });
