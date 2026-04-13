@@ -900,59 +900,75 @@ function stopAudio(){
 }
 
 // ══ NOTE INTERACTION — TAP TO SELECT ═════════════════════════
-// Strategy: let the browser handle scrolling naturally.
-// Only intercept a TOUCH if it barely moved (= intentional tap on a blob).
-// Mouse clicks always try to select (desktop use).
-
 let tapStartX=0,tapStartY=0,tapStartTime=0,tapMoved=false;
+let lastTapTime=0,lastTapX2=0,lastTapY2=0;
+const DOUBLE_TAP_MS=350, DOUBLE_TAP_PX=30;
 
 edCanvas.addEventListener('touchstart',(e)=>{
   const t=e.touches[0];
-  tapStartX=t.clientX;
-  tapStartY=t.clientY;
-  tapStartTime=Date.now();
-  tapMoved=false;
-},{passive:true}); // passive=true lets browser scroll freely
+  tapStartX=t.clientX; tapStartY=t.clientY;
+  tapStartTime=Date.now(); tapMoved=false;
+},{passive:true});
 
 edCanvas.addEventListener('touchmove',(e)=>{
   const t=e.touches[0];
-  const dx=Math.abs(t.clientX-tapStartX);
-  const dy=Math.abs(t.clientY-tapStartY);
-  if(dx>10||dy>10) tapMoved=true;
+  if(Math.abs(t.clientX-tapStartX)>10||Math.abs(t.clientY-tapStartY)>10) tapMoved=true;
 },{passive:true});
 
 edCanvas.addEventListener('touchend',(e)=>{
   if(tapMoved) return;
   if(Date.now()-tapStartTime>600) return;
   const ct=e.changedTouches[0];
-  // Use edScroll's bounding rect, not canvas (canvas moves with scroll)
   const rect=edScroll.getBoundingClientRect();
   const x=(ct.clientX-rect.left)+edScroll.scrollLeft;
   const y=(ct.clientY-rect.top)+edScroll.scrollTop;
-  handleTap(x,y);
+  const now=Date.now();
+  const isDouble=
+    (now-lastTapTime)<DOUBLE_TAP_MS&&
+    Math.abs(ct.clientX-lastTapX2)<DOUBLE_TAP_PX&&
+    Math.abs(ct.clientY-lastTapY2)<DOUBLE_TAP_PX;
+  lastTapTime=now; lastTapX2=ct.clientX; lastTapY2=ct.clientY;
+  handleTap(x,y,isDouble);
 },{passive:true});
 
-// mouse click for desktop
+// mouse: single click = tap, double click = double tap
+edCanvas.addEventListener('dblclick',(e)=>{
+  const rect=edScroll.getBoundingClientRect();
+  const x=(e.clientX-rect.left)+edScroll.scrollLeft;
+  const y=(e.clientY-rect.top)+edScroll.scrollTop;
+  handleTap(x,y,true);
+});
 edCanvas.addEventListener('click',(e)=>{
   const rect=edScroll.getBoundingClientRect();
   const x=(e.clientX-rect.left)+edScroll.scrollLeft;
   const y=(e.clientY-rect.top)+edScroll.scrollTop;
-  handleTap(x,y);
+  handleTap(x,y,false);
 });
 
-function handleTap(x,y){
+function handleTap(x,y,isDouble){
   const hit=hitTest(x,y);
   if(hit){
+    // tapped a note blob — select it (single or double both select)
     notes.forEach(n=>n.selected=false);
-    hit.selected=true;
-    selectedNote=hit;
+    hit.selected=true; selectedNote=hit;
     showNotePanel(hit);
   } else {
+    // tapped empty area
     notes.forEach(n=>n.selected=false);
-    selectedNote=null;
-    hideNotePanel();
-    if(originalBuffer) playOffset=Math.max(0,Math.min(xToTime(x),originalBuffer.duration));
-    document.getElementById('ph-time').textContent=fmtTime(playOffset);
+    selectedNote=null; hideNotePanel();
+    // set locator position
+    if(originalBuffer){
+      playOffset=Math.max(0,Math.min(xToTime(x),originalBuffer.duration));
+      document.getElementById('ph-time').textContent=fmtTime(playOffset);
+    }
+    if(isDouble){
+      // double tap = play from locator
+      if(isPlaying) stopAudio();
+      playAudio();
+    } else {
+      // single tap = stop if playing, just move locator if stopped
+      if(isPlaying) pauseAudio();
+    }
   }
   drawEditor();
 }
