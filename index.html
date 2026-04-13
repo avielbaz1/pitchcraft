@@ -902,7 +902,7 @@ function stopAudio(){
 // ══ NOTE INTERACTION — TAP TO SELECT ═════════════════════════
 let tapStartX=0,tapStartY=0,tapStartTime=0,tapMoved=false;
 let lastTapTime=0,lastTapClientX=0,lastTapClientY=0;
-const DOUBLE_TAP_MS=300,DOUBLE_TAP_PX=40;
+const DOUBLE_TAP_MS=280,DOUBLE_TAP_PX=40;
 
 function getCanvasXY(clientX,clientY){
   const rect=edScroll.getBoundingClientRect();
@@ -946,10 +946,12 @@ edCanvas.addEventListener('click',(e)=>{
 function handleTap(x,y,isDouble){
   const hit=hitTest(x,y);
   if(hit){
+    // tapped a note blob — select it, never interrupt playback
     notes.forEach(n=>n.selected=false);
     hit.selected=true;selectedNote=hit;
     showNotePanel(hit);
   } else {
+    // tapped empty area
     notes.forEach(n=>n.selected=false);
     selectedNote=null;hideNotePanel();
     if(originalBuffer){
@@ -957,9 +959,12 @@ function handleTap(x,y,isDouble){
       document.getElementById('ph-time').textContent=fmtTime(playOffset);
     }
     if(isDouble){
+      // double tap = play from this position
+      lastTapTime=0; // reset so next tap won't be detected as double
       if(isPlaying)stopAudio();
       playAudio();
     } else {
+      // single tap on empty = stop if playing, do nothing if already stopped
       if(isPlaying)pauseAudio();
     }
   }
