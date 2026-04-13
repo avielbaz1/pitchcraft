@@ -946,26 +946,31 @@ edCanvas.addEventListener('click',(e)=>{
 function handleTap(x,y,isDouble){
   const hit=hitTest(x,y);
   if(hit){
-    // tapped a note blob — select it, never interrupt playback
+    // tapped a note blob — select, never interrupt playback
     notes.forEach(n=>n.selected=false);
     hit.selected=true;selectedNote=hit;
     showNotePanel(hit);
   } else {
-    // tapped empty area
     notes.forEach(n=>n.selected=false);
     selectedNote=null;hideNotePanel();
-    if(originalBuffer){
-      playOffset=Math.max(0,Math.min(xToTime(x),originalBuffer.duration));
-      document.getElementById('ph-time').textContent=fmtTime(playOffset);
-    }
     if(isDouble){
-      // double tap = play from this position
-      lastTapTime=0; // reset so next tap won't be detected as double
-      if(isPlaying)stopAudio();
+      // double tap = jump to position and play
+      const newPos=originalBuffer?Math.max(0,Math.min(xToTime(x),originalBuffer.duration)):0;
+      stopAudio();
+      playOffset=newPos;
+      lastTapTime=0;
+      document.getElementById('ph-time').textContent=fmtTime(playOffset);
       playAudio();
     } else {
-      // single tap on empty = stop if playing, do nothing if already stopped
-      if(isPlaying)pauseAudio();
+      // single tap = pause if playing, else move locator
+      if(isPlaying){
+        pauseAudio();
+      } else {
+        if(originalBuffer){
+          playOffset=Math.max(0,Math.min(xToTime(x),originalBuffer.duration));
+          document.getElementById('ph-time').textContent=fmtTime(playOffset);
+        }
+      }
     }
   }
   drawEditor();
