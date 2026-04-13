@@ -902,8 +902,7 @@ function stopAudio(){
 // ══ NOTE INTERACTION — TAP TO SELECT ═════════════════════════
 let tapStartX=0,tapStartY=0,tapStartTime=0,tapMoved=false;
 let lastTapTime=0,lastTapClientX=0,lastTapClientY=0;
-let singleTapTimer=null;
-const DOUBLE_TAP_MS=300,DOUBLE_TAP_PX=30;
+const DOUBLE_TAP_MS=300,DOUBLE_TAP_PX=40;
 
 function getCanvasXY(clientX,clientY){
   const rect=edScroll.getBoundingClientRect();
@@ -917,11 +916,12 @@ edCanvas.addEventListener('touchstart',(e)=>{
 
 edCanvas.addEventListener('touchmove',(e)=>{
   const t=e.touches[0];
-  if(Math.abs(t.clientX-tapStartX)>10||Math.abs(t.clientY-tapStartY)>10)tapMoved=true;
+  if(Math.abs(t.clientX-tapStartX)>12||Math.abs(t.clientY-tapStartY)>12)tapMoved=true;
 },{passive:true});
 
 edCanvas.addEventListener('touchend',(e)=>{
-  if(tapMoved||Date.now()-tapStartTime>600)return;
+  if(tapMoved||Date.now()-tapStartTime>700)return;
+  e.preventDefault(); // prevent ghost mouse click on Android
   const ct=e.changedTouches[0];
   const now=Date.now();
   const isDouble=(now-lastTapTime)<DOUBLE_TAP_MS&&
@@ -929,15 +929,10 @@ edCanvas.addEventListener('touchend',(e)=>{
     Math.abs(ct.clientY-lastTapClientY)<DOUBLE_TAP_PX;
   lastTapTime=now;lastTapClientX=ct.clientX;lastTapClientY=ct.clientY;
   const{x,y}=getCanvasXY(ct.clientX,ct.clientY);
-  clearTimeout(singleTapTimer);
-  if(isDouble){
-    handleTap(x,y,true);
-  } else {
-    singleTapTimer=setTimeout(()=>handleTap(x,y,false),DOUBLE_TAP_MS+20);
-  }
-},{passive:true});
+  handleTap(x,y,isDouble);
+},{passive:false}); // non-passive — lets preventDefault block ghost click
 
-// desktop — use only click, track double click manually (avoids click+dblclick double-fire)
+// desktop mouse only
 edCanvas.addEventListener('click',(e)=>{
   const now=Date.now();
   const isDouble=(now-lastTapTime)<DOUBLE_TAP_MS&&
@@ -945,12 +940,7 @@ edCanvas.addEventListener('click',(e)=>{
     Math.abs(e.clientY-lastTapClientY)<DOUBLE_TAP_PX;
   lastTapTime=now;lastTapClientX=e.clientX;lastTapClientY=e.clientY;
   const{x,y}=getCanvasXY(e.clientX,e.clientY);
-  clearTimeout(singleTapTimer);
-  if(isDouble){
-    handleTap(x,y,true);
-  } else {
-    singleTapTimer=setTimeout(()=>handleTap(x,y,false),DOUBLE_TAP_MS+20);
-  }
+  handleTap(x,y,isDouble);
 });
 
 function handleTap(x,y,isDouble){
