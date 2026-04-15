@@ -144,6 +144,17 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
       <option value="minor">Minor</option>
     </select>
 
+    <div style="margin-bottom:.75rem">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem">
+        <span style="font-size:10px;font-family:var(--mono);letter-spacing:1px;color:var(--muted);text-transform:uppercase">sensitivity</span>
+        <span style="font-size:11px;font-family:var(--mono);color:var(--accent)" id="sens-label">medium</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:.5rem">
+        <span style="font-size:9px;font-family:var(--mono);color:var(--muted2)">legato</span>
+        <input type="range" id="sensitivity" min="1" max="5" value="3" step="1" style="flex:1">
+        <span style="font-size:9px;font-family:var(--mono);color:var(--muted2)">staccato</span>
+      </div>
+    </div>
     <div class="lbl">Record</div>
     <div class="vol-wrap"><div class="vol-bar" id="vol-bar"></div></div>
     <div class="rec-btn-wrap">
@@ -152,16 +163,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
       </button>
       <div class="rec-timer" id="rec-timer"></div>
       <div class="rec-status" id="rec-status">tap to record</div>
-    </div>
-
-    <div style="margin-bottom:.85rem">
-      <div class="lbl" style="margin-bottom:.4rem">Detection sensitivity</div>
-      <div style="display:flex;align-items:center;gap:.6rem">
-        <span style="font-size:10px;font-family:var(--mono);color:var(--muted)">legato</span>
-        <input type="range" id="sensitivity" min="1" max="5" value="3" step="1" style="flex:1">
-        <span style="font-size:10px;font-family:var(--mono);color:var(--muted)">staccato</span>
-      </div>
-      <div style="text-align:center;font-size:11px;font-family:var(--mono);color:var(--accent);margin-top:3px" id="sens-label">medium</div>
     </div>
 
     <div class="divider"><span>or</span></div>
