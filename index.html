@@ -154,6 +154,16 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
       <div class="rec-status" id="rec-status">tap to record</div>
     </div>
 
+    <div style="margin-bottom:.85rem">
+      <div class="lbl" style="margin-bottom:.4rem">Detection sensitivity</div>
+      <div style="display:flex;align-items:center;gap:.6rem">
+        <span style="font-size:10px;font-family:var(--mono);color:var(--muted)">legato</span>
+        <input type="range" id="sensitivity" min="1" max="5" value="3" step="1" style="flex:1">
+        <span style="font-size:10px;font-family:var(--mono);color:var(--muted)">staccato</span>
+      </div>
+      <div style="text-align:center;font-size:11px;font-family:var(--mono);color:var(--accent);margin-top:3px" id="sens-label">medium</div>
+    </div>
+
     <div class="divider"><span>or</span></div>
     <label class="upload-btn" for="file-in">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -272,20 +282,24 @@ function cents(midi){return Math.round((midi-snapMidi(midi))*100);}
 function detectPitch(buf,sr){
   const n=buf.length;
   let rms=0;for(let i=0;i<n;i++)rms+=buf[i]*buf[i];rms=Math.sqrt(rms/n);
-  if(rms<0.003)return{freq:-1,rms};
+  if(rms<0.002)return{freq:-1,rms};
 
-  // Focus on typical singing voice range: 80Hz - 800Hz
-  const minP=Math.floor(sr/800),maxP=Math.ceil(sr/80);
+  // Full vocal range: 70Hz-1100Hz (covers bass to soprano)
+  const minP=Math.floor(sr/1100),maxP=Math.ceil(sr/70);
   let bestR=-1,bestL=-1;
   for(let lag=minP;lag<=maxP&&lag<n/2;lag++){
     let num=0,d1=0,d2=0;
-    for(let i=0;i<n-lag;i++){num+=buf[i]*buf[i+lag];d1+=buf[i]*buf[i];d2+=buf[i+lag]*buf[i+lag];}
+    for(let i=0;i<n-lag;i++){
+      num+=buf[i]*buf[i+lag];
+      d1+=buf[i]*buf[i];
+      d2+=buf[i+lag]*buf[i+lag];
+    }
     const r=(d1*d2)>0?num/Math.sqrt(d1*d2):0;
     if(r>bestR){bestR=r;bestL=lag;}
   }
-  if(bestR<0.45||bestL<1)return{freq:-1,rms};
+  if(bestR<0.35||bestL<1)return{freq:-1,rms};
 
-  // parabolic refinement
+  // Parabolic refinement
   if(bestL>minP&&bestL<n/2-1){
     const r0=getR(buf,n,bestL-1),r1=bestR,r2=getR(buf,n,bestL+1);
     const d=2*r1-r0-r2;if(d>0)bestL+=0.5*(r0-r2)/d;
@@ -293,19 +307,16 @@ function detectPitch(buf,sr){
 
   let freq=sr/bestL;
 
-  // Octave correction: check if double frequency has strong correlation
-  // If so, we detected the sub-harmonic — correct upward
-  if(freq>80&&freq<400){
-    const halfLag=bestL/2;
-    const intHalfLag=Math.round(halfLag);
-    if(intHalfLag>=minP){
-      const rDouble=getR(buf,n,intHalfLag);
-      // if octave-up correlation is nearly as strong, prefer the higher pitch
-      if(rDouble>bestR*0.85) freq*=2;
+  // Octave correction for low voices — check if octave-up is stronger
+  if(freq>70&&freq<400){
+    const halfLag=Math.round(bestL/2);
+    if(halfLag>=minP&&halfLag<n/2){
+      const rDouble=getR(buf,n,halfLag);
+      if(rDouble>bestR*0.80) freq*=2;
     }
   }
 
-  return{freq:(freq>80&&freq<800)?freq:-1,rms};
+  return{freq:(freq>70&&freq<1100)?freq:-1,rms};
 }
 function getR(buf,n,lag){
   let num=0,d1=0,d2=0;
@@ -447,7 +458,29 @@ function cloneBuffer(src){
   return dst;
 }
 
-// ══ NOTE ANALYSIS ════════════════════════════════════════════
+// ══ SENSITIVITY SLIDER ═══════════════════════════════════════
+const sensSlider=document.getElementById('sensitivity');
+const sensLabel=document.getElementById('sens-label');
+const SENS_LABELS=['','legato','low','medium','high','staccato'];
+sensSlider.oninput=()=>{ sensLabel.textContent=SENS_LABELS[sensSlider.value]; };
+
+function getSensParams(){
+  const v=parseInt(sensSlider.value); // 1-5
+  return{
+    // SAME_NOTE: how wide the "same note" window is in semitones
+    // wider = fewer splits (legato), narrower = more splits (staccato)
+    sameNote:    [0,1.4, 1.1, 0.8, 0.6, 0.4][v],
+    // CONFIRM: how many frames needed to confirm a new note
+    // more = harder to split (legato), fewer = easier to split (staccato)
+    confirmSm:   [0,  8,   6,   5,   4,   3][v], // for small jumps <1.5st
+    confirmMd:   [0,  4,   3,   3,   2,   2][v], // for medium jumps 1.5-2.5st
+    confirmLg:   [0,  2,   2,   2,   2,   1][v], // for large jumps >2.5st
+    // MIN_MS: minimum note duration in ms
+    minMs:       [0,160, 140, 120, 100,  80][v],
+    // GAP_BRIDGE: how many silent frames to bridge within a note
+    gapBridge:   [0,  6,   5,   4,   3,   2][v],
+  };
+}
 let notes=[];
 let undoStack=[];// array of notes snapshots
 
@@ -487,11 +520,11 @@ function analyzeBuffer(buf){
       voiced:freq>0&&rms>0.003, rms    });
   }
 
-  // Pass 2: median smooth over 7 frames to kill vibrato/noise
-  for(let i=3;i<frames.length-3;i++){
+  // Pass 2: median smooth over 9 frames to kill vibrato/noise
+  for(let i=4;i<frames.length-4;i++){
     if(!frames[i].voiced) continue;
     const vals=[];
-    for(let k=i-3;k<=i+3;k++) if(frames[k].voiced) vals.push(frames[k].midi);
+    for(let k=i-4;k<=i+4;k++) if(frames[k].voiced) vals.push(frames[k].midi);
     if(vals.length>=3){
       vals.sort((a,b)=>a-b);
       frames[i].midi=vals[Math.floor(vals.length/2)];
@@ -499,49 +532,71 @@ function analyzeBuffer(buf){
     }
   }
 
-  // Pass 3: snap each frame to nearest semitone integer
+  // Pass 3: snap each frame to nearest semitone
   frames.forEach(f=>{ if(f.voiced) f.semitone=Math.round(f.midi); });
 
-  // Pass 4: segment into notes
+  // Pass 4: segment using sensitivity params
+  const SP=getSensParams();
   notes=[];
-  const MIN_FRAMES=Math.ceil(150/(HOP/sr*1000)); // 150ms minimum — filters short glide fragments
-  const SPLIT_CONFIRM=6; // need 6 frames on new pitch to confirm split (~75ms at HOP=512)
+  const MIN_FRAMES=Math.ceil(SP.minMs/(HOP/sr*1000));
   let i=0;
 
   while(i<frames.length){
     if(!frames[i].voiced){i++;continue;}
 
-    const targetSemitone=frames[i].semitone;
+    const seedVals=[];
+    for(let k=i;k<Math.min(i+16,frames.length)&&seedVals.length<8;k++){
+      if(frames[k].voiced) seedVals.push(frames[k].midi);
+    }
+    seedVals.sort((a,b)=>a-b);
+    const seedMidi=seedVals[Math.floor(seedVals.length/2)];
+
     let end=i, freqSum=frames[i].freq, count=1;
+    const SAME_NOTE=SP.sameNote;
+    const rollingMidis=[];
+    for(let k=i;k<Math.min(i+8,frames.length);k++){
+      if(frames[k].voiced) rollingMidis.push(frames[k].midi);
+    }
 
     for(let j=i+1;j<frames.length;j++){
       if(!frames[j].voiced){
-        // bridge short silence < 4 frames (~40ms)
         let gap=0;
-        for(let g=j;g<Math.min(j+4,frames.length);g++){
+        for(let g=j;g<Math.min(j+SP.gapBridge,frames.length);g++){
           if(!frames[g].voiced) gap++; else break;
         }
-        if(gap<4){j+=gap-1;continue;} else break;
+        if(gap<SP.gapBridge){j+=gap-1;continue;} else break;
       }
-      // exact semitone match only — prevents adjacent semitones (E/F, B/C) from merging
-      if(frames[j].semitone===targetSemitone){
+
+      // dynamic center = median of last 12 voiced frames
+      rollingMidis.push(frames[j].midi);
+      if(rollingMidis.length>12) rollingMidis.shift();
+      const sorted=[...rollingMidis].sort((a,b)=>a-b);
+      const dynamicCenter=sorted[Math.floor(sorted.length/2)];
+      const diff=Math.abs(frames[j].midi-dynamicCenter);
+
+      if(diff<=SAME_NOTE){
         end=j; freqSum+=frames[j].freq; count++;
       } else {
-        const semDiff=Math.abs(frames[j].semitone-targetSemitone);
-        // large jump (2+ semitones) = always a new note, split immediately
-        if(semDiff>=2) break;
-        // small jump (exactly 1 semitone) = could be vibrato, need confirmation
-        const newTarget=frames[j].semitone;
-        let confirmed=0;
-        for(let k=j;k<Math.min(j+SPLIT_CONFIRM+1,frames.length);k++){
-          if(frames[k].voiced&&frames[k].semitone===newTarget) confirmed++;
+        // Pitch departed from center — is it vibrato (oscillates back) or a new note (stays away)?
+        // Count how many of the next N frames stay above the threshold
+        const newMidi=frames[j].midi;
+        const jumpSize=diff;
+        const needed=jumpSize<1.5?SP.confirmSm:jumpSize<2.5?SP.confirmMd:SP.confirmLg;
+        const lookAhead=needed+3;
+        let stayCount=0, returnCount=0;
+        for(let k=j;k<Math.min(j+lookAhead,frames.length);k++){
+          if(!frames[k].voiced) continue;
+          if(Math.abs(frames[k].midi-newMidi)<=SAME_NOTE) stayCount++;
+          else if(Math.abs(frames[k].midi-dynamicCenter)<=SAME_NOTE) returnCount++;
         }
-        if(confirmed>=SPLIT_CONFIRM) break;
-        // else: vibrato passing tone — skip
+        // Split if: stays enough times AND never returns to old pitch
+        if(stayCount>=needed&&returnCount===0) break;
+        // Also split on large clean jumps even if return count is 1
+        if(stayCount>=needed&&jumpSize>=2.0&&returnCount<=1) break;
+        // else: vibrato — don't add to note
       }
     }
 
-    // only save notes that are long enough
     if(end-i+1>=MIN_FRAMES){
       const avgFreq=freqSum/count;
       const midi=f2midi(avgFreq);
@@ -558,7 +613,7 @@ function analyzeBuffer(buf){
       });
       i=end+1;
     } else {
-      i++; // too short — skip (removes ghost blobs from glides)
+      i++;
     }
   }
 
