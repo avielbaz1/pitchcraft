@@ -1109,10 +1109,31 @@ function showNotePanel(n){
   npControls.style.display='flex';
   updateNotePanel(n);
   refreshNoteList();
+  playNote(n); // play the selected note so user can hear it
 }
 function hideNotePanel(){
   npEmpty.style.display='block';
   npControls.style.display='none';
+}
+
+// Play just the selected note segment from corrected buffer
+let notePreviewSource=null;
+function playNote(n){
+  if(!audioCtx||!correctedBuffer) return;
+  // stop any current preview or main playback
+  if(notePreviewSource){
+    try{notePreviewSource.onended=null;notePreviewSource.stop();}catch(e){}
+  }
+  if(isPlaying) pauseAudio();
+
+  const src=audioCtx.createBufferSource();
+  src.buffer=correctedBuffer;
+  src.connect(audioCtx.destination);
+  const start=n.startTime;
+  const duration=n.endTime-n.startTime;
+  src.start(0, start, duration);
+  notePreviewSource=src;
+  src.onended=()=>{ notePreviewSource=null; };
 }
 function updateNotePanel(n){
   const em=n.midi+n.tuneOffset;
@@ -1145,7 +1166,7 @@ npPitchSl.oninput=()=>{
   updateNotePanel(selectedNote);
   drawEditor();
 };
-npPitchSl.onchange=()=>{ if(selectedNote){pushUndo();rebuildCorrectedBuffer();refreshNoteList();} };
+npPitchSl.onchange=()=>{ if(selectedNote){pushUndo();rebuildCorrectedBuffer();refreshNoteList();playNote(selectedNote);} };
 
 // vibrato slider input
 npVibSl.oninput=()=>{
@@ -1229,7 +1250,7 @@ document.getElementById('np-snap').onclick=()=>{
   selectedNote.tuneOffset=snapMidi(selectedNote.midiOrig)-selectedNote.midiOrig;
   updateNoteCents(selectedNote);
   updateNotePanel(selectedNote);
-  rebuildCorrectedBuffer();refreshNoteList();drawEditor();
+  rebuildCorrectedBuffer();refreshNoteList();drawEditor();playNote(selectedNote);
 };
 document.getElementById('np-close').onclick=()=>{
   notes.forEach(n=>n.selected=false);
