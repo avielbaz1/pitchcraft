@@ -23,12 +23,12 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--sans);height:
 .screen.hidden{opacity:0;pointer-events:none;transform:translateY(24px)}
 
 /* ── RECORD SCREEN ── */
-#rec-screen{background:var(--bg);align-items:center;justify-content:center;padding:1.5rem}
-.brand{text-align:center;margin-bottom:2.5rem}
-.brand h1{font-family:var(--mono);font-size:24px;font-weight:700;letter-spacing:-1px}
+#rec-screen{background:var(--bg);align-items:center;justify-content:flex-start;padding:1.5rem;overflow-y:auto}
+.brand{text-align:center;margin-bottom:1.5rem}
+.brand h1{font-family:var(--mono);font-size:22px;font-weight:700;letter-spacing:-1px}
 .brand h1 em{color:var(--accent);font-style:normal}
 .brand p{font-size:12px;color:var(--muted);margin-top:4px}
-.rec-card{background:var(--s1);border:1px solid var(--border);border-radius:20px;padding:1.5rem;width:100%;max-width:400px}
+.rec-card{background:var(--s1);border:1px solid var(--border);border-radius:20px;padding:1.25rem;width:100%;max-width:400px}
 .rec-card .lbl{font-size:10px;font-family:var(--mono);letter-spacing:1.2px;color:var(--muted);text-transform:uppercase;margin-bottom:.75rem}
 /* key grid */
 .kg{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:.65rem}
@@ -36,8 +36,8 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--sans);height:
 .kb.on{background:var(--accent);border-color:var(--accent);color:#fff}
 select{width:100%;background:var(--s2);border:1px solid var(--border);color:var(--text);font-family:var(--sans);font-size:13px;padding:7px 10px;border-radius:8px;outline:none;margin-bottom:.85rem}
 /* big record button */
-.rec-btn-wrap{display:flex;flex-direction:column;align-items:center;gap:.75rem;margin:1.25rem 0}
-#big-rec{width:80px;height:80px;border-radius:50%;background:var(--red);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;box-shadow:0 0 0 0 rgba(248,113,113,.4)}
+.rec-btn-wrap{display:flex;flex-direction:column;align-items:center;gap:.5rem;margin:.75rem 0}
+#big-rec{width:70px;height:70px;border-radius:50%;background:var(--red);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;box-shadow:0 0 0 0 rgba(248,113,113,.4)}
 #big-rec.recording{animation:pulse 1.2s infinite}
 #big-rec svg{width:28px;height:28px;fill:#fff}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(248,113,113,.5)}70%{box-shadow:0 0 0 18px rgba(248,113,113,0)}100%{box-shadow:0 0 0 0 rgba(248,113,113,0)}}
