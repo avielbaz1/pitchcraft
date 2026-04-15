@@ -279,50 +279,80 @@ function snapMidi(midi){
 }
 function cents(midi){return Math.round((midi-snapMidi(midi))*100);}
 
-// ══ PITCH DETECTION ══════════════════════════════════════════
-function detectPitch(buf,sr){
+// ══ PITCH DETECTION — McLeod Pitch Method (MPM) ══════════════
+// MPM is used by professional tools — much more accurate than
+// plain autocorrelation, handles harmonics and male voice well.
+function detectPitch(buf, sr){
   const n=buf.length;
-  let rms=0;for(let i=0;i<n;i++)rms+=buf[i]*buf[i];rms=Math.sqrt(rms/n);
-  if(rms<0.002)return{freq:-1,rms};
 
-  // Full vocal range: 70Hz-1100Hz (covers bass to soprano)
-  const minP=Math.floor(sr/1100),maxP=Math.ceil(sr/70);
-  let bestR=-1,bestL=-1;
-  for(let lag=minP;lag<=maxP&&lag<n/2;lag++){
-    let num=0,d1=0,d2=0;
+  // RMS check
+  let rms=0;
+  for(let i=0;i<n;i++) rms+=buf[i]*buf[i];
+  rms=Math.sqrt(rms/n);
+  if(rms<0.002) return{freq:-1,rms};
+
+  // Step 1: Normalized Square Difference Function (NSDF)
+  // nsdf[lag] = 2 * r[lag] / (r[0]+r[lag]) — ranges -1 to +1
+  // This handles amplitude changes that fool plain autocorrelation
+  const nsdf=new Float32Array(n);
+  let acf0=0;
+  for(let i=0;i<n;i++) acf0+=buf[i]*buf[i];
+
+  for(let lag=0;lag<n;lag++){
+    let num=0,denom=0;
+    let acfLag=0;
     for(let i=0;i<n-lag;i++){
       num+=buf[i]*buf[i+lag];
-      d1+=buf[i]*buf[i];
-      d2+=buf[i+lag]*buf[i+lag];
+      acfLag+=buf[i+lag]*buf[i+lag];
     }
-    const r=(d1*d2)>0?num/Math.sqrt(d1*d2):0;
-    if(r>bestR){bestR=r;bestL=lag;}
-  }
-  if(bestR<0.35||bestL<1)return{freq:-1,rms};
-
-  // Parabolic refinement
-  if(bestL>minP&&bestL<n/2-1){
-    const r0=getR(buf,n,bestL-1),r1=bestR,r2=getR(buf,n,bestL+1);
-    const d=2*r1-r0-r2;if(d>0)bestL+=0.5*(r0-r2)/d;
+    denom=acf0+acfLag;
+    nsdf[lag]=denom>0?(2*num)/denom:0;
   }
 
-  let freq=sr/bestL;
+  // Step 2: Find key maxima in NSDF (peaks above threshold)
+  // Only look in vocal frequency range
+  const minLag=Math.floor(sr/1100); // ~1100Hz max (soprano)
+  const maxLag=Math.ceil(sr/70);    // ~70Hz min (bass)
 
-  // Octave correction for low voices — check if octave-up is stronger
-  if(freq>70&&freq<400){
-    const halfLag=Math.round(bestL/2);
-    if(halfLag>=minP&&halfLag<n/2){
-      const rDouble=getR(buf,n,halfLag);
-      if(rDouble>bestR*0.80) freq*=2;
+  // Find all positive-to-negative zero crossings, then find max between them
+  const keyMaxima=[];
+  let i=minLag;
+  while(i<Math.min(maxLag,n-1)){
+    // find next positive zero crossing
+    while(i<Math.min(maxLag,n-1)&&nsdf[i]<=0) i++;
+    if(i>=Math.min(maxLag,n-1)) break;
+    // find peak until next negative zero crossing
+    let maxVal=nsdf[i],maxIdx=i;
+    while(i<Math.min(maxLag,n-1)&&nsdf[i]>0){
+      if(nsdf[i]>maxVal){maxVal=nsdf[i];maxIdx=i;}
+      i++;
     }
+    if(maxVal>0) keyMaxima.push({lag:maxIdx,val:maxVal});
   }
 
+  if(keyMaxima.length===0) return{freq:-1,rms};
+
+  // Step 3: Pick the best maximum
+  // Use the FIRST maximum that exceeds 80% of the global maximum
+  // (first = lowest lag = highest frequency = avoids octave errors)
+  const globalMax=Math.max(...keyMaxima.map(m=>m.val));
+  const threshold=0.8; // lower = more detections, higher = fewer false positives
+  let chosen=null;
+  for(const km of keyMaxima){
+    if(km.val>=globalMax*threshold){chosen=km;break;}
+  }
+  if(!chosen||chosen.val<0.3) return{freq:-1,rms};
+
+  // Step 4: Parabolic interpolation for sub-sample accuracy
+  let lag=chosen.lag;
+  if(lag>0&&lag<n-1){
+    const y0=nsdf[lag-1],y1=nsdf[lag],y2=nsdf[lag+1];
+    const d=2*y1-y0-y2;
+    if(d>0) lag+=0.5*(y0-y2)/d;
+  }
+
+  const freq=sr/lag;
   return{freq:(freq>70&&freq<1100)?freq:-1,rms};
-}
-function getR(buf,n,lag){
-  let num=0,d1=0,d2=0;
-  for(let i=0;i<n-lag;i++){num+=buf[i]*buf[i+lag];d1+=buf[i]*buf[i];d2+=buf[i+lag]*buf[i+lag];}
-  return(d1*d2)>0?num/Math.sqrt(d1*d2):0;
 }
 
 // ══ SCREEN MANAGEMENT ════════════════════════════════════════
