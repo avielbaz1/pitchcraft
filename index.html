@@ -223,9 +223,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
       </div>
       <div class="np-row">
         <span class="np-lbl">pitch</span>
-        <button class="np-step" id="np-pitch-dn">-10¢</button>
-        <input type="range" id="np-pitch-sl" min="-200" max="200" value="0" step="1">
-        <button class="np-step" id="np-pitch-up">+10¢</button>
+        <button class="np-step" id="np-pitch-dn">-1st</button>
+        <input type="range" id="np-pitch-sl" min="-400" max="400" value="0" step="1">
+        <button class="np-step" id="np-pitch-up">+1st</button>
         <span class="np-val" id="np-pitch-val">0¢</span>
       </div>
       <div class="np-row">
@@ -279,80 +279,50 @@ function snapMidi(midi){
 }
 function cents(midi){return Math.round((midi-snapMidi(midi))*100);}
 
-// ══ PITCH DETECTION — McLeod Pitch Method (MPM) ══════════════
-// MPM is used by professional tools — much more accurate than
-// plain autocorrelation, handles harmonics and male voice well.
-function detectPitch(buf, sr){
+// ══ PITCH DETECTION — Normalized Autocorrelation ═════════════
+function detectPitch(buf,sr){
   const n=buf.length;
+  let rms=0;for(let i=0;i<n;i++)rms+=buf[i]*buf[i];rms=Math.sqrt(rms/n);
+  if(rms<0.002)return{freq:-1,rms};
 
-  // RMS check
-  let rms=0;
-  for(let i=0;i<n;i++) rms+=buf[i]*buf[i];
-  rms=Math.sqrt(rms/n);
-  if(rms<0.002) return{freq:-1,rms};
-
-  // Step 1: Normalized Square Difference Function (NSDF)
-  // nsdf[lag] = 2 * r[lag] / (r[0]+r[lag]) — ranges -1 to +1
-  // This handles amplitude changes that fool plain autocorrelation
-  const nsdf=new Float32Array(n);
-  let acf0=0;
-  for(let i=0;i<n;i++) acf0+=buf[i]*buf[i];
-
-  for(let lag=0;lag<n;lag++){
-    let num=0,denom=0;
-    let acfLag=0;
+  // Full vocal range: 70Hz-1100Hz
+  const minP=Math.floor(sr/1100),maxP=Math.ceil(sr/70);
+  let bestR=-1,bestL=-1;
+  for(let lag=minP;lag<=maxP&&lag<n/2;lag++){
+    let num=0,d1=0,d2=0;
     for(let i=0;i<n-lag;i++){
       num+=buf[i]*buf[i+lag];
-      acfLag+=buf[i+lag]*buf[i+lag];
+      d1+=buf[i]*buf[i];
+      d2+=buf[i+lag]*buf[i+lag];
     }
-    denom=acf0+acfLag;
-    nsdf[lag]=denom>0?(2*num)/denom:0;
+    const r=(d1*d2)>0?num/Math.sqrt(d1*d2):0;
+    if(r>bestR){bestR=r;bestL=lag;}
+  }
+  if(bestR<0.4||bestL<1)return{freq:-1,rms};
+
+  // Parabolic refinement
+  if(bestL>minP&&bestL<n/2-1){
+    const r0=getR(buf,n,bestL-1),r1=bestR,r2=getR(buf,n,bestL+1);
+    const d=2*r1-r0-r2;if(d>0)bestL+=0.5*(r0-r2)/d;
   }
 
-  // Step 2: Find key maxima in NSDF (peaks above threshold)
-  // Only look in vocal frequency range
-  const minLag=Math.floor(sr/1100); // ~1100Hz max (soprano)
-  const maxLag=Math.ceil(sr/70);    // ~70Hz min (bass)
+  let freq=sr/bestL;
 
-  // Find all positive-to-negative zero crossings, then find max between them
-  const keyMaxima=[];
-  let i=minLag;
-  while(i<Math.min(maxLag,n-1)){
-    // find next positive zero crossing
-    while(i<Math.min(maxLag,n-1)&&nsdf[i]<=0) i++;
-    if(i>=Math.min(maxLag,n-1)) break;
-    // find peak until next negative zero crossing
-    let maxVal=nsdf[i],maxIdx=i;
-    while(i<Math.min(maxLag,n-1)&&nsdf[i]>0){
-      if(nsdf[i]>maxVal){maxVal=nsdf[i];maxIdx=i;}
-      i++;
+  // Octave correction — check if double frequency (half lag) is stronger
+  if(freq>70&&freq<400){
+    const halfLag=Math.round(bestL/2);
+    if(halfLag>=minP&&halfLag<n/2){
+      const rDouble=getR(buf,n,halfLag);
+      if(rDouble>bestR*0.82) freq*=2;
     }
-    if(maxVal>0) keyMaxima.push({lag:maxIdx,val:maxVal});
   }
 
-  if(keyMaxima.length===0) return{freq:-1,rms};
-
-  // Step 3: Pick the best maximum
-  // Use the FIRST maximum that exceeds 80% of the global maximum
-  // (first = lowest lag = highest frequency = avoids octave errors)
-  const globalMax=Math.max(...keyMaxima.map(m=>m.val));
-  const threshold=0.8; // lower = more detections, higher = fewer false positives
-  let chosen=null;
-  for(const km of keyMaxima){
-    if(km.val>=globalMax*threshold){chosen=km;break;}
-  }
-  if(!chosen||chosen.val<0.3) return{freq:-1,rms};
-
-  // Step 4: Parabolic interpolation for sub-sample accuracy
-  let lag=chosen.lag;
-  if(lag>0&&lag<n-1){
-    const y0=nsdf[lag-1],y1=nsdf[lag],y2=nsdf[lag+1];
-    const d=2*y1-y0-y2;
-    if(d>0) lag+=0.5*(y0-y2)/d;
-  }
-
-  const freq=sr/lag;
   return{freq:(freq>70&&freq<1100)?freq:-1,rms};
+}
+function getR(buf,n,lag){
+  let num=0,d1=0,d2=0;
+  for(let i=0;i<n-lag;i++){num+=buf[i]*buf[i+lag];d1+=buf[i]*buf[i];d2+=buf[i+lag]*buf[i+lag];}
+  return(d1*d2)>0?num/Math.sqrt(d1*d2):0;
 }
 
 // ══ SCREEN MANAGEMENT ════════════════════════════════════════
@@ -498,18 +468,12 @@ sensSlider.oninput=()=>{ sensLabel.textContent=SENS_LABELS[sensSlider.value]; };
 function getSensParams(){
   const v=parseInt(sensSlider.value); // 1-5
   return{
-    // SAME_NOTE: how wide the "same note" window is in semitones
-    // wider = fewer splits (legato), narrower = more splits (staccato)
-    sameNote:    [0,1.4, 1.1, 0.8, 0.6, 0.4][v],
-    // CONFIRM: how many frames needed to confirm a new note
-    // more = harder to split (legato), fewer = easier to split (staccato)
-    confirmSm:   [0,  8,   6,   5,   4,   3][v], // for small jumps <1.5st
-    confirmMd:   [0,  4,   3,   3,   2,   2][v], // for medium jumps 1.5-2.5st
-    confirmLg:   [0,  2,   2,   2,   2,   1][v], // for large jumps >2.5st
-    // MIN_MS: minimum note duration in ms
-    minMs:       [0,160, 140, 120, 100,  80][v],
-    // GAP_BRIDGE: how many silent frames to bridge within a note
-    gapBridge:   [0,  6,   5,   4,   3,   2][v],
+    sameNote:    [0, 1.2, 0.9, 0.7, 0.5, 0.35][v],
+    confirmSm:   [0,   7,   5,   4,   3,   2][v], // for small jumps <1.5st
+    confirmMd:   [0,   4,   3,   2,   2,   1][v], // for medium jumps 1.5-2.5st
+    confirmLg:   [0,   2,   2,   1,   1,   1][v], // for large jumps >2.5st
+    minMs:       [0, 150, 130, 100,  80,  60][v],
+    gapBridge:   [0,   6,   5,   4,   3,   2][v],
   };
 }
 let notes=[];
@@ -620,9 +584,10 @@ function analyzeBuffer(buf){
           if(Math.abs(frames[k].midi-newMidi)<=SAME_NOTE) stayCount++;
           else if(Math.abs(frames[k].midi-dynamicCenter)<=SAME_NOTE) returnCount++;
         }
-        // Split if: stays enough times AND never returns to old pitch
-        if(stayCount>=needed&&returnCount===0) break;
-        // Also split on large clean jumps even if return count is 1
+        // Split if stays enough AND doesn't return too much
+        // Allow 1 return for small jumps (legato), 0 for large jumps
+        const maxReturns=jumpSize<1.5?1:0;
+        if(stayCount>=needed&&returnCount<=maxReturns) break;
         if(stayCount>=needed&&jumpSize>=2.0&&returnCount<=1) break;
         // else: vibrato — don't add to note
       }
@@ -1179,17 +1144,17 @@ npVibSl.onchange=()=>{ if(selectedNote) rebuildCorrectedBuffer(); };
 // step buttons
 document.getElementById('np-pitch-dn').onclick=()=>{
   if(!selectedNote)return;
-  selectedNote.tuneOffset-=0.1;
+  selectedNote.tuneOffset-=1; // 1 full semitone down
   updateNoteCents(selectedNote);
   updateNotePanel(selectedNote);
-  rebuildCorrectedBuffer();refreshNoteList();drawEditor();
+  rebuildCorrectedBuffer();refreshNoteList();playNote(selectedNote);drawEditor();
 };
 document.getElementById('np-pitch-up').onclick=()=>{
   if(!selectedNote)return;
-  selectedNote.tuneOffset+=0.1;
+  selectedNote.tuneOffset+=1; // 1 full semitone up
   updateNoteCents(selectedNote);
   updateNotePanel(selectedNote);
-  rebuildCorrectedBuffer();refreshNoteList();drawEditor();
+  rebuildCorrectedBuffer();refreshNoteList();playNote(selectedNote);drawEditor();
 };
 document.getElementById('np-vib-dn').onclick=()=>{
   if(!selectedNote)return;
@@ -1230,12 +1195,11 @@ document.getElementById('np-split').onclick=()=>{
   const midSample=Math.floor((n.startSample+n.endSample)/2);
   // first half
   const first={...n,endTime:midTime,endSample:midSample,selected:false};
-  // second half — shift midi up by 1 semitone as a hint it's a different note
-  const secondMidi=n.midi+1;
+  // second half — same pitch as original, user adjusts manually
   const second={...n,
     startTime:midTime,startSample:midSample,
-    midi:secondMidi,midiOrig:secondMidi,freq:midi2f(secondMidi),
-    cents:Math.round((secondMidi-snapMidi(secondMidi))*100),
+    midi:n.midi,midiOrig:n.midi,freq:n.freq,
+    cents:n.cents,
     tuneOffset:0,selected:true
   };
   notes.splice(idx,1,first,second);
@@ -1243,6 +1207,14 @@ document.getElementById('np-split').onclick=()=>{
   showNotePanel(second);
   rebuildCorrectedBuffer();
   drawEditor();
+  // Focus the pitch slider so user can immediately adjust the second note
+  setTimeout(()=>{
+    const sl=document.getElementById('np-pitch-sl');
+    if(sl) sl.focus();
+    // Show hint in the note info
+    const npHz=document.getElementById('np-hz');
+    if(npHz) npHz.textContent='← drag pitch slider';
+  },100);
 };
 document.getElementById('np-snap').onclick=()=>{
   if(!selectedNote)return;
