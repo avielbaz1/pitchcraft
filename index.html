@@ -577,19 +577,18 @@ function analyzeBuffer(buf){
         const newMidi=frames[j].midi;
         const jumpSize=diff;
         const needed=jumpSize<1.5?SP.confirmSm:jumpSize<2.5?SP.confirmMd:SP.confirmLg;
-        const lookAhead=needed+3;
-        let stayCount=0, returnCount=0;
+        const lookAhead=needed+4;
+        let stayCount=0, returnCount=0, totalVoiced=0;
         for(let k=j;k<Math.min(j+lookAhead,frames.length);k++){
           if(!frames[k].voiced) continue;
+          totalVoiced++;
           if(Math.abs(frames[k].midi-newMidi)<=SAME_NOTE) stayCount++;
           else if(Math.abs(frames[k].midi-dynamicCenter)<=SAME_NOTE) returnCount++;
         }
-        // Split if stays enough AND doesn't return too much
-        // Allow 1 return for small jumps (legato), 0 for large jumps
-        const maxReturns=jumpSize<1.5?1:0;
-        if(stayCount>=needed&&returnCount<=maxReturns) break;
-        if(stayCount>=needed&&jumpSize>=2.0&&returnCount<=1) break;
-        // else: vibrato — don't add to note
+        // Split if: enough stay on new pitch AND staying more than returning
+        // Use ratio so legato transitions (which return briefly) still split
+        const stayRatio=totalVoiced>0?stayCount/totalVoiced:0;
+        if(stayCount>=needed&&stayRatio>0.5) break;
       }
     }
 
@@ -1195,12 +1194,14 @@ document.getElementById('np-split').onclick=()=>{
   const midSample=Math.floor((n.startSample+n.endSample)/2);
   // first half
   const first={...n,endTime:midTime,endSample:midSample,selected:false};
-  // second half — same pitch as original, user adjusts manually
+  // second half — offset -0.5 semitone visually so it's clearly separate
+  // user uses +1st/-1st buttons to set correct pitch
   const second={...n,
     startTime:midTime,startSample:midSample,
     midi:n.midi,midiOrig:n.midi,freq:n.freq,
     cents:n.cents,
-    tuneOffset:0,selected:true
+    tuneOffset:-0.5, // visual offset so it doesn't overlap first half
+    selected:true
   };
   notes.splice(idx,1,first,second);
   selectedNote=second;
