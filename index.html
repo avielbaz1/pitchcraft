@@ -1193,14 +1193,16 @@ document.getElementById('np-split').onclick=()=>{
   const midTime=(n.startTime+n.endTime)/2;
   const midSample=Math.floor((n.startSample+n.endSample)/2);
   // first half
-  const first={...n,endTime:midTime,endSample:midSample,selected:false};
-  // second half — offset -0.5 semitone visually so it's clearly separate
-  // user uses +1st/-1st buttons to set correct pitch
+  const first={...n,endTime:midTime,endSample:midSample,selected:false,tuneOffset:n.tuneOffset};
+  // second half — move down 1 full semitone visually so clearly separate on screen
+  // user presses +1st or +2st to set correct pitch
   const second={...n,
     startTime:midTime,startSample:midSample,
-    midi:n.midi,midiOrig:n.midi,freq:n.freq,
-    cents:n.cents,
-    tuneOffset:-0.5, // visual offset so it doesn't overlap first half
+    midi:n.midi-1,        // actually move midi down 1 semitone
+    midiOrig:n.midi-1,
+    freq:midi2f(n.midi-1),
+    cents:Math.round(((n.midi-1)-snapMidi(n.midi-1))*100),
+    tuneOffset:0,
     selected:true
   };
   notes.splice(idx,1,first,second);
