@@ -1449,38 +1449,74 @@ function rebuildCorrectedBuffer(){
     const hasVibrato=(n.vibratoReduction||0)>0;
     if(!hasShift&&!hasVibrato)return;
 
-    const ratio=Math.pow(2,n.tuneOffset/12);
     const start=Math.floor(n.startSample);
     const end=Math.min(Math.ceil(n.endSample),originalBuffer.length);
     const segLen=end-start;
     if(segLen<1)return;
 
+    // Vibrato reduction builds a per-sample ratio array. Without vibrato, the ratio
+    // is constant (2^(tuneOffset/12)). With vibrato, we add a time-varying delta that
+    // flattens pitch excursions while preserving the average pitch.
+    let ratioArray=null; // null = use constant ratio below
+    if(hasVibrato){
+      const vAmt=(n.vibratoReduction||0)/100;
+      const src0=originalBuffer.getChannelData(0);
+      // Track pitch per frame inside the segment.
+      const WIN=1024,HOP=256;
+      const pitches=[]; // {t:centerSample, midi} for each voiced frame
+      for(let i=start;i+WIN<end;i+=HOP){
+        const sl=src0.slice(i,i+WIN);
+        const{freq,rms}=detectPitch(sl,sr);
+        if(freq>0&&rms>0.003) pitches.push({t:i+WIN/2, midi:f2midi(freq)});
+      }
+      if(pitches.length>=3){
+        // Average midi across the note — the "stable center pitch"
+        const avgMidi=pitches.reduce((s,p)=>s+p.midi,0)/pitches.length;
+        // Build a per-sample ratio: flatten the deviation from avg by vAmt.
+        //   per-frame deviation = midi[i] - avgMidi
+        //   we want new pitch = midi[i] - deviation*vAmt = midi[i]*(1-vAmt) + avgMidi*vAmt
+        //   shift needed     = new - midi[i] = -deviation*vAmt
+        //   plus the user's tuneOffset on top
+        ratioArray=new Float32Array(segLen);
+        let pIdx=0;
+        for(let i=0;i<segLen;i++){
+          const absPos=start+i;
+          // advance pIdx so pitches[pIdx].t <= absPos < pitches[pIdx+1].t
+          while(pIdx<pitches.length-2 && pitches[pIdx+1].t<=absPos) pIdx++;
+          const p0=pitches[pIdx], p1=pitches[Math.min(pIdx+1,pitches.length-1)];
+          const span=Math.max(1,p1.t-p0.t);
+          const frac=Math.max(0,Math.min(1,(absPos-p0.t)/span));
+          const curMidi=p0.midi*(1-frac)+p1.midi*frac;
+          const flatten=-(curMidi-avgMidi)*vAmt;   // semitones to shift to flatten
+          const totalSemitones=n.tuneOffset+flatten;
+          ratioArray[i]=Math.pow(2,totalSemitones/12);
+        }
+      }
+    }
+    const constRatio=Math.pow(2,n.tuneOffset/12);
+
     for(let ch=0;ch<originalBuffer.numberOfChannels;ch++){
       const src=originalBuffer.getChannelData(ch);
       const dst=correctedBuffer.getChannelData(ch);
 
-      // build temp shifted segment
+      // Build shifted segment. When vibrato reduction is on, ratio varies per sample.
+      // Use a phase accumulator so the output timebase remains continuous across
+      // varying ratios (no clicks from ratio jumps).
       const tmp=new Float32Array(segLen);
+      let srcPos=0;
       for(let i=0;i<segLen;i++){
-        const srcIdx=start+i*ratio;
+        const r=ratioArray?ratioArray[i]:constRatio;
+        const srcIdx=start+srcPos;
         const si=Math.floor(srcIdx);
         const frac=srcIdx-si;
         tmp[i]=si+1<src.length?(1-frac)*src[si]+frac*src[si+1]:src[Math.min(si,src.length-1)];
+        srcPos+=r;
+        if(srcPos>=segLen) srcPos=segLen-1; // clamp so we don't read past the note end
       }
 
       // vibrato reduction: blend toward segment-average pitch (smoothed copy)
-      if(hasVibrato&&(n.vibratoReduction||0)>0){
-        const vAmt=(n.vibratoReduction||0)/100;
-        // low-pass filter to get the stable pitch center
-        const smooth=new Float32Array(segLen);
-        const LPWIN=Math.floor(sr*0.04); // 40ms window
-        for(let i=0;i<segLen;i++){
-          let s=0,c=0;
-          for(let j=Math.max(0,i-LPWIN);j<Math.min(segLen,i+LPWIN);j++){s+=tmp[j];c++;}
-          smooth[i]=s/c;
-        }
-        for(let i=0;i<segLen;i++) tmp[i]=tmp[i]*(1-vAmt)+smooth[i]*vAmt;
-      }
+      // (vibrato reduction is now handled via the time-varying ratio array above —
+      //  no post-processing of sample values here)
 
       // crossfade at start
       const fadeIn=Math.min(FADE,segLen/2);
