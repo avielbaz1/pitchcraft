@@ -448,6 +448,12 @@ async function loadAudioFromUrl(url,name){
   document.getElementById('proc-text').textContent='detecting notes...';
   await new Promise(r=>setTimeout(r,50));
   analyzeBuffer(originalBuffer);
+  // Reset quantize slider for the new recording — no leftover state from a previous session
+  const qs=document.getElementById('q-slider');
+  const qv=document.getElementById('q-val');
+  if(qs){ qs.value=0; }
+  if(qv){ qv.textContent='0%'; }
+  qSliderActive=false;
   buildEditor();
   showScreen('ed-screen');
   requestAnimationFrame(()=>{initEditorCanvas();drawEditor();});
