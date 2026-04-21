@@ -253,6 +253,21 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
   </div>
 </div>
 
+<!-- DEBUG TOAST: shows what snap/quantize/split actually did. Remove when done diagnosing. -->
+<div id="dbg-toast" style="position:fixed;top:10px;left:10px;right:10px;background:rgba(0,0,0,0.92);color:#0f0;font-family:monospace;font-size:11px;padding:8px;border-radius:6px;z-index:9999;display:none;white-space:pre-wrap;max-height:40vh;overflow:auto;pointer-events:none"></div>
+
+<script>
+function dbgShow(msg){
+  const el=document.getElementById('dbg-toast');
+  if(!el) return;
+  const now=new Date().toLocaleTimeString();
+  el.textContent='['+now+']\n'+msg;
+  el.style.display='block';
+  clearTimeout(window._dbgT);
+  window._dbgT=setTimeout(()=>{el.style.display='none';},10000);
+}
+</script>
+
 <script>
 // ══ MUSIC THEORY ══════════════════════════════════════════════
 const NOTES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
@@ -1322,12 +1337,19 @@ document.getElementById('np-split').onclick=()=>{
 document.getElementById('np-snap').onclick=()=>{
   if(!selectedNote)return;
   pushUndo();
-  // Snap = move the detected pitch to the nearest grid note (the one whose name is
-  // shown on the blob). tuneOffset is always relative to n.midi, so:
-  //   offset = target_grid_note - detected_midi
   const n=selectedNote;
-  n.tuneOffset=snapMidi(n.midi)-n.midi;
+  const before={midi:n.midi,tuneOffset:n.tuneOffset,cents:n.cents};
+  const target=snapMidi(n.midi);
+  n.tuneOffset=target-n.midi;
   updateNoteCents(n);
+  dbgShow(
+    'SNAP\n'+
+    'midi='+before.midi.toFixed(2)+' ('+midiName(Math.round(before.midi))+')\n'+
+    'target='+target+' ('+midiName(target)+')\n'+
+    'offset: '+before.tuneOffset.toFixed(2)+' → '+n.tuneOffset.toFixed(2)+'\n'+
+    'cents: '+before.cents+' → '+n.cents+'\n'+
+    'ratio='+Math.pow(2,n.tuneOffset/12).toFixed(4)
+  );
   updateNotePanel(n);
   rebuildCorrectedBuffer();refreshNoteList();drawEditor();playNote(n);
 };
@@ -1344,15 +1366,20 @@ qSlider.oninput=()=>{ qVal.textContent=qSlider.value+'%'; };
 document.getElementById('apply-btn').onclick=()=>{
   pushUndo();
   const amount=parseInt(qSlider.value)/100;
-  // Quantize = pull each note's detected pitch toward its nearest grid note by `amount`.
-  // Uses n.midi (what's actually being shown/heard) so it works correctly after splits
-  // and re-edits. tuneOffset is relative to n.midi.
-  notes.forEach(n=>{
+  let lines=['QUANTIZE amount='+(amount*100).toFixed(0)+'%  notes='+notes.length];
+  notes.forEach((n,i)=>{
+    const before={midi:n.midi,tuneOffset:n.tuneOffset};
     const snapped=snapMidi(n.midi);
     const diff=snapped-n.midi;
     n.tuneOffset=diff*amount;
     n.cents=Math.round((n.midi+n.tuneOffset-snapMidi(n.midi+n.tuneOffset))*100);
+    if(i<4) lines.push(
+      '#'+i+' '+midiName(Math.round(n.midi))+' midi='+before.midi.toFixed(2)+
+      ' →target='+midiName(snapped)+' diff='+diff.toFixed(2)+
+      ' off:'+before.tuneOffset.toFixed(2)+'→'+n.tuneOffset.toFixed(2)
+    );
   });
+  dbgShow(lines.join('\n'));
   rebuildCorrectedBuffer();
   refreshNoteList();
   drawEditor();
