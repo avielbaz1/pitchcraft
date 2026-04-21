@@ -530,6 +530,16 @@ function analyzeBuffer(buf){
   // Pass 3: snap each frame to nearest semitone
   frames.forEach(f=>{ if(f.voiced) f.semitone=Math.round(f.midi); });
 
+  // DEBUG: dump raw per-frame pitch readings so we can see exactly what the detector sees
+  const NN=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  const rawDump=frames.map((f,idx)=>{
+    if(!f.voiced) return `[${idx}:--]`;
+    const nn=NN[((Math.round(f.midi)%12)+12)%12]+Math.floor(Math.round(f.midi)/12-1);
+    return `[${idx}:${f.midi.toFixed(2)}/${nn}]`;
+  }).join(' ');
+  console.log('RAW FRAMES:\n'+rawDump);
+  console.log(`Total frames: ${frames.length}, voiced: ${frames.filter(f=>f.voiced).length}`);
+
   // Pass 4: segment using sensitivity params
   const SP=getSensParams();
   notes=[];
@@ -540,8 +550,18 @@ function analyzeBuffer(buf){
     if(!frames[i].voiced){i++;continue;}
 
     const seedVals=[];
-    for(let k=i;k<Math.min(i+16,frames.length)&&seedVals.length<8;k++){
+    // Look a few frames in (3-frame offset ≈ ~35ms at 44.1kHz/HOP512) so the seed
+    // reflects the STABLE pitch of the new note, not the tail end of a glide/portamento
+    // from the previous note. Keeps ascending intervals like C→D from seeding at C#.
+    const seedStart=Math.min(i+3,frames.length-1);
+    for(let k=seedStart;k<Math.min(seedStart+20,frames.length)&&seedVals.length<10;k++){
       if(frames[k].voiced) seedVals.push(frames[k].midi);
+    }
+    // Fallback: if nothing there, fall back to frames from position i
+    if(seedVals.length<3){
+      for(let k=i;k<Math.min(i+16,frames.length)&&seedVals.length<8;k++){
+        if(frames[k].voiced) seedVals.push(frames[k].midi);
+      }
     }
     seedVals.sort((a,b)=>a-b);
     const seedMidi=seedVals[Math.floor(seedVals.length/2)];
@@ -606,9 +626,36 @@ function analyzeBuffer(buf){
     }
 
     if(end-i+1>=MIN_FRAMES){
-      const avgFreq=freqSum/count;
-      const midi=f2midi(avgFreq);
+      // Compute final pitch from the STABLE body of the note, not the attack transition.
+      // Skip the first ~30ms (attack/portamento) and use the median of semitone values.
+      // Median-based MIDI is robust to both vibrato and lead-in glide, so an ascending
+      // C→D no longer gets dragged to C# by the transitional frames.
+      const segLen=end-i+1;
+      const skip=Math.min(Math.floor(segLen*0.15), Math.ceil(30/(HOP/sr*1000)));
+      const bodyStart=i+skip;
+      const midiVals=[];
+      const freqVals=[];
+      for(let k=bodyStart;k<=end;k++){
+        if(frames[k].voiced){
+          midiVals.push(frames[k].midi);
+          freqVals.push(frames[k].freq);
+        }
+      }
+      // Fallback if skip left too little
+      if(midiVals.length<3){
+        for(let k=i;k<=end;k++){
+          if(frames[k].voiced){ midiVals.push(frames[k].midi); freqVals.push(frames[k].freq); }
+        }
+      }
+      midiVals.sort((a,b)=>a-b);
+      const midi=midiVals[Math.floor(midiVals.length/2)];
+      // avgFreq still reported for display, but snap is driven by the robust MIDI median
+      const avgFreq=freqVals.reduce((s,v)=>s+v,0)/freqVals.length;
       const snapped=snapMidi(midi);
+      // DEBUG: log what we detect for each note — remove when satisfied
+      const NOTE_NAMES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+      const noteName=NOTE_NAMES[((snapped%12)+12)%12]+Math.floor(snapped/12-1);
+      console.log(`NOTE @${frames[i].t.toFixed(2)}s  key=${NOTE_NAMES[selKey]}/${selScale}  median_midi=${midi.toFixed(2)}  →snap=${snapped}(${noteName})  raw_midis=[${midiVals.slice(0,Math.min(10,midiVals.length)).map(v=>v.toFixed(2)).join(',')}${midiVals.length>10?'...':''}]`);
       notes.push({
         startSample:frames[i].samplePos,
         endSample:Math.min(frames[end].samplePos+WIN,buf.length),
