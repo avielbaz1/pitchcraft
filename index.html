@@ -763,7 +763,10 @@ function drawPiano(){
 }
 
 function noteColor(n){
-  const totalCents=n.cents+(n.tuneOffset*100);
+  // n.cents is already the effective cents deviation (includes tuneOffset via updateNoteCents).
+  // Earlier code added tuneOffset*100 a second time, which mis-colored any note that had
+  // been pitch-shifted — e.g. a snapped note would still look "red" instead of green.
+  const totalCents=n.cents;
   const ac=Math.abs(totalCents);
   if(ac<15)return{base:'#34d399',fill:'rgba(52,211,153,0.18)',stroke:'rgba(52,211,153,0.9)'};
   if(ac<35)return{base:'#fbbf24',fill:'rgba(251,191,36,0.18)',stroke:'rgba(251,191,36,0.9)'};
@@ -781,7 +784,8 @@ function drawBlob(n){
   const y=centerY-BLOB_H/2;
   const{base,fill,stroke}=noteColor(n);
   const r=Math.min(BLOB_H/2,7);
-  const totalCents=Math.round(n.cents+n.tuneOffset*100);
+  // n.cents is the effective deviation (already includes tuneOffset). Do NOT add tuneOffset*100.
+  const totalCents=n.cents;
 
   // glow for selected
   if(n.selected){
@@ -1318,10 +1322,14 @@ document.getElementById('np-split').onclick=()=>{
 document.getElementById('np-snap').onclick=()=>{
   if(!selectedNote)return;
   pushUndo();
-  selectedNote.tuneOffset=snapMidi(selectedNote.midiOrig)-selectedNote.midiOrig;
-  updateNoteCents(selectedNote);
-  updateNotePanel(selectedNote);
-  rebuildCorrectedBuffer();refreshNoteList();drawEditor();playNote(selectedNote);
+  // Snap = move the detected pitch to the nearest grid note (the one whose name is
+  // shown on the blob). tuneOffset is always relative to n.midi, so:
+  //   offset = target_grid_note - detected_midi
+  const n=selectedNote;
+  n.tuneOffset=snapMidi(n.midi)-n.midi;
+  updateNoteCents(n);
+  updateNotePanel(n);
+  rebuildCorrectedBuffer();refreshNoteList();drawEditor();playNote(n);
 };
 document.getElementById('np-close').onclick=()=>{
   notes.forEach(n=>n.selected=false);
@@ -1336,11 +1344,14 @@ qSlider.oninput=()=>{ qVal.textContent=qSlider.value+'%'; };
 document.getElementById('apply-btn').onclick=()=>{
   pushUndo();
   const amount=parseInt(qSlider.value)/100;
+  // Quantize = pull each note's detected pitch toward its nearest grid note by `amount`.
+  // Uses n.midi (what's actually being shown/heard) so it works correctly after splits
+  // and re-edits. tuneOffset is relative to n.midi.
   notes.forEach(n=>{
-    const snapped=snapMidi(n.midiOrig);
-    const diff=snapped-n.midiOrig;
+    const snapped=snapMidi(n.midi);
+    const diff=snapped-n.midi;
     n.tuneOffset=diff*amount;
-    n.cents=Math.round((n.midiOrig+n.tuneOffset-snapMidi(n.midiOrig+n.tuneOffset))*100);
+    n.cents=Math.round((n.midi+n.tuneOffset-snapMidi(n.midi+n.tuneOffset))*100);
   });
   rebuildCorrectedBuffer();
   refreshNoteList();
