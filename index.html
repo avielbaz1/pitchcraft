@@ -789,7 +789,8 @@ function noteColor(n){
 }
 
 function drawBlob(n){
-  const effectiveMidi=n.midi+n.tuneOffset;
+  // Invariant: n.midi = n.midiOrig + n.tuneOffset. It IS the effective displayed pitch.
+  const effectiveMidi=n.midi;
   // blob spans 2 semitone rows tall, centered on pitch
   const BLOB_H=ROW_H*1.8;
   const x=timeToX(n.startTime)+1;
@@ -1173,11 +1174,13 @@ function playNote(n){
   src.onended=()=>{ notePreviewSource=null; };
 }
 function updateNotePanel(n){
-  const em=n.midi+n.tuneOffset;
+  // Invariant: n.midi already equals n.midiOrig + n.tuneOffset (the effective/displayed pitch).
+  // Do NOT add tuneOffset again.
+  const em=n.midi;
   const totalCents=Math.round((em-snapMidi(em))*100);
   const col=Math.abs(totalCents)<15?'#34d399':Math.abs(totalCents)<35?'#fbbf24':'#f87171';
   npName.textContent=midiName(Math.round(em));
-  npHz.textContent=Math.round(n.freq)+'Hz';
+  npHz.textContent=Math.round(midi2f(em))+'Hz';
   npCents.textContent=(totalCents>0?'+':'')+totalCents+'¢';
   npCents.style.color=col;
   // pitch slider: offset in cents (-200 to +200)
@@ -1189,8 +1192,9 @@ function updateNotePanel(n){
   npVibVal.textContent=(n.vibratoReduction||0)+'%';
 }
 function updateNoteCents(n){
-  const em=n.midi+n.tuneOffset;
-  n.cents=Math.round((em-snapMidi(em))*100);
+  // Keep the invariant: midi = midiOrig + tuneOffset
+  n.midi=n.midiOrig+n.tuneOffset;
+  n.cents=Math.round((n.midi-snapMidi(n.midi))*100);
 }
 
 // pitch slider input
@@ -1244,14 +1248,15 @@ document.getElementById('np-merge').onclick=()=>{
   if(idx<0||idx>=notes.length-1)return;
   pushUndo();
   const next=notes[idx+1];
-  // merge selectedNote with next note
-  const avg=(selectedNote.freq+next.freq)/2;
+  // merge selectedNote with next note — take the average of the true recorded pitches
+  const mergedOrig=(selectedNote.midiOrig+next.midiOrig)/2;
   selectedNote.endTime=next.endTime;
   selectedNote.endSample=next.endSample;
-  selectedNote.freq=avg;
-  selectedNote.midi=f2midi(avg);
-  selectedNote.midiOrig=selectedNote.midi;
-  selectedNote.cents=Math.round((selectedNote.midi-snapMidi(selectedNote.midi))*100);
+  selectedNote.midiOrig=mergedOrig;
+  selectedNote.tuneOffset=0;          // reset any prior correction — user can re-snap
+  selectedNote.midi=mergedOrig;       // midi = midiOrig + 0
+  selectedNote.freq=midi2f(mergedOrig);
+  selectedNote.cents=Math.round((mergedOrig-snapMidi(mergedOrig))*100);
   notes.splice(idx+1,1);
   updateNotePanel(selectedNote);
   rebuildCorrectedBuffer();
@@ -1297,27 +1302,32 @@ document.getElementById('np-split').onclick=()=>{
   const midTime=(n.startTime+n.endTime)/2;
   const midSample=Math.floor((n.startSample+n.endSample)/2);
 
-  // Re-detect actual pitch in each half from the original audio.
-  // This is the key fix: no arbitrary semitone shift — the new pitch comes from
-  // what was actually sung/played in that half of the audio.
-  const firstMidi =detectPitchInRange(n.startSample,midSample);
-  const secondMidi=detectPitchInRange(midSample,n.endSample);
+  // Re-detect actual pitch in each half from the ORIGINAL audio.
+  // INVARIANT: midiOrig = true pitch of the recorded audio (never changes).
+  //            midi    = midiOrig + tuneOffset (what's shown / what you hear after correction).
+  //            tuneOffset starts at 0 after a fresh split — no correction yet applied.
+  const firstMidiOrig =detectPitchInRange(n.startSample,midSample);
+  const secondMidiOrig=detectPitchInRange(midSample,n.endSample);
 
-  // First half: use detected pitch if available, otherwise keep original
-  const firstM=firstMidi!==null?firstMidi:n.midi;
+  // First half: use detected pitch if available, otherwise fall back to parent's original pitch
+  const firstOrig=firstMidiOrig!==null?firstMidiOrig:n.midiOrig;
   const first={...n,
     endTime:midTime, endSample:midSample,
-    midi:firstM, midiOrig:firstM, freq:midi2f(firstM),
-    cents:Math.round((firstM-snapMidi(firstM))*100),
+    midiOrig:firstOrig,
+    midi:firstOrig,              // midi = midiOrig + 0
+    freq:midi2f(firstOrig),
+    cents:Math.round((firstOrig-snapMidi(firstOrig))*100),
     tuneOffset:0, selected:false
   };
 
-  // Second half: use detected pitch if available, otherwise keep original
-  const secondM=secondMidi!==null?secondMidi:n.midi;
+  // Second half
+  const secondOrig=secondMidiOrig!==null?secondMidiOrig:n.midiOrig;
   const second={...n,
     startTime:midTime, startSample:midSample,
-    midi:secondM, midiOrig:secondM, freq:midi2f(secondM),
-    cents:Math.round((secondM-snapMidi(secondM))*100),
+    midiOrig:secondOrig,
+    midi:secondOrig,             // midi = midiOrig + 0
+    freq:midi2f(secondOrig),
+    cents:Math.round((secondOrig-snapMidi(secondOrig))*100),
     tuneOffset:0, selected:true
   };
   notes.splice(idx,1,first,second);
@@ -1338,14 +1348,24 @@ document.getElementById('np-snap').onclick=()=>{
   if(!selectedNote)return;
   pushUndo();
   const n=selectedNote;
-  const before={midi:n.midi,tuneOffset:n.tuneOffset,cents:n.cents};
+  const before={midiOrig:n.midiOrig,midi:n.midi,tuneOffset:n.tuneOffset,cents:n.cents};
+  // Snap = align the CURRENT displayed pitch (n.midi, what the blob shows) to the
+  // nearest grid note. Respects manual pitch edits: if the user moved the note up 1
+  // semitone and then pressed snap, we snap from the new position, not the original.
+  // tuneOffset is an ADDITIVE correction layered on midiOrig — we adjust it by the
+  // delta needed to bring n.midi onto the grid.
   const target=snapMidi(n.midi);
-  n.tuneOffset=target-n.midi;
+  const delta=target-n.midi;            // how far n.midi needs to move
+  n.tuneOffset += delta;                // add to whatever correction is already there
+  n.midi = n.midiOrig + n.tuneOffset;   // maintain invariant
   updateNoteCents(n);
   dbgShow(
     'SNAP\n'+
-    'midi='+before.midi.toFixed(2)+' ('+midiName(Math.round(before.midi))+')\n'+
+    'midiOrig='+before.midiOrig.toFixed(2)+' ('+midiName(Math.round(before.midiOrig))+')\n'+
+    'midi (current)='+before.midi.toFixed(2)+' ('+midiName(Math.round(before.midi))+')\n'+
     'target='+target+' ('+midiName(target)+')\n'+
+    'delta='+delta.toFixed(2)+'\n'+
+    'midi: '+before.midi.toFixed(2)+' → '+n.midi.toFixed(2)+'\n'+
     'offset: '+before.tuneOffset.toFixed(2)+' → '+n.tuneOffset.toFixed(2)+'\n'+
     'cents: '+before.cents+' → '+n.cents+'\n'+
     'ratio='+Math.pow(2,n.tuneOffset/12).toFixed(4)
@@ -1367,15 +1387,19 @@ document.getElementById('apply-btn').onclick=()=>{
   pushUndo();
   const amount=parseInt(qSlider.value)/100;
   let lines=['QUANTIZE amount='+(amount*100).toFixed(0)+'%  notes='+notes.length];
+  // Quantize pulls each note's CURRENT displayed pitch (n.midi) toward its nearest
+  // grid note by `amount`. Respects manual pitch edits — e.g. if the user moved a
+  // note up a semitone, the target is the grid note near the new position, not the original.
   notes.forEach((n,i)=>{
-    const before={midi:n.midi,tuneOffset:n.tuneOffset};
+    const before={midiOrig:n.midiOrig,midi:n.midi,tuneOffset:n.tuneOffset};
     const snapped=snapMidi(n.midi);
-    const diff=snapped-n.midi;
-    n.tuneOffset=diff*amount;
-    n.cents=Math.round((n.midi+n.tuneOffset-snapMidi(n.midi+n.tuneOffset))*100);
+    const delta=snapped-n.midi;
+    n.tuneOffset += delta*amount;       // additive correction on top of any existing
+    n.midi = n.midiOrig + n.tuneOffset; // maintain invariant
+    n.cents=Math.round((n.midi-snapMidi(n.midi))*100);
     if(i<4) lines.push(
-      '#'+i+' '+midiName(Math.round(n.midi))+' midi='+before.midi.toFixed(2)+
-      ' →target='+midiName(snapped)+' diff='+diff.toFixed(2)+
+      '#'+i+' orig='+before.midiOrig.toFixed(2)+' midi='+before.midi.toFixed(2)+'('+midiName(Math.round(before.midi))+')'+
+      ' →target='+midiName(snapped)+' delta='+delta.toFixed(2)+
       ' off:'+before.tuneOffset.toFixed(2)+'→'+n.tuneOffset.toFixed(2)
     );
   });
