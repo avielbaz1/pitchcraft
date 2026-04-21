@@ -253,21 +253,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
   </div>
 </div>
 
-<!-- DEBUG TOAST: shows what snap/quantize/split actually did. Remove when done diagnosing. -->
-<div id="dbg-toast" style="position:fixed;top:10px;left:10px;right:10px;background:rgba(0,0,0,0.92);color:#0f0;font-family:monospace;font-size:11px;padding:8px;border-radius:6px;z-index:9999;display:none;white-space:pre-wrap;max-height:40vh;overflow:auto;pointer-events:none"></div>
-
-<script>
-function dbgShow(msg){
-  const el=document.getElementById('dbg-toast');
-  if(!el) return;
-  const now=new Date().toLocaleTimeString();
-  el.textContent='['+now+']\n'+msg;
-  el.style.display='block';
-  clearTimeout(window._dbgT);
-  window._dbgT=setTimeout(()=>{el.style.display='none';},10000);
-}
-</script>
-
 <script>
 // ══ MUSIC THEORY ══════════════════════════════════════════════
 const NOTES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
@@ -1348,28 +1333,13 @@ document.getElementById('np-snap').onclick=()=>{
   if(!selectedNote)return;
   pushUndo();
   const n=selectedNote;
-  const before={midiOrig:n.midiOrig,midi:n.midi,tuneOffset:n.tuneOffset,cents:n.cents};
-  // Snap = align the CURRENT displayed pitch (n.midi, what the blob shows) to the
-  // nearest grid note. Respects manual pitch edits: if the user moved the note up 1
-  // semitone and then pressed snap, we snap from the new position, not the original.
-  // tuneOffset is an ADDITIVE correction layered on midiOrig — we adjust it by the
-  // delta needed to bring n.midi onto the grid.
+  // Snap = align the CURRENT displayed pitch (n.midi) to the nearest grid note.
+  // Respects manual pitch edits: additive correction on top of whatever offset already exists.
   const target=snapMidi(n.midi);
-  const delta=target-n.midi;            // how far n.midi needs to move
-  n.tuneOffset += delta;                // add to whatever correction is already there
-  n.midi = n.midiOrig + n.tuneOffset;   // maintain invariant
+  const delta=target-n.midi;
+  n.tuneOffset += delta;
+  n.midi = n.midiOrig + n.tuneOffset;
   updateNoteCents(n);
-  dbgShow(
-    'SNAP\n'+
-    'midiOrig='+before.midiOrig.toFixed(2)+' ('+midiName(Math.round(before.midiOrig))+')\n'+
-    'midi (current)='+before.midi.toFixed(2)+' ('+midiName(Math.round(before.midi))+')\n'+
-    'target='+target+' ('+midiName(target)+')\n'+
-    'delta='+delta.toFixed(2)+'\n'+
-    'midi: '+before.midi.toFixed(2)+' → '+n.midi.toFixed(2)+'\n'+
-    'offset: '+before.tuneOffset.toFixed(2)+' → '+n.tuneOffset.toFixed(2)+'\n'+
-    'cents: '+before.cents+' → '+n.cents+'\n'+
-    'ratio='+Math.pow(2,n.tuneOffset/12).toFixed(4)
-  );
   updateNotePanel(n);
   rebuildCorrectedBuffer();refreshNoteList();drawEditor();playNote(n);
 };
@@ -1381,31 +1351,83 @@ document.getElementById('np-close').onclick=()=>{
 // ══ QUANTIZE SLIDER ══════════════════════════════════════════
 const qSlider=document.getElementById('q-slider');
 const qVal=document.getElementById('q-val');
-qSlider.oninput=()=>{ qVal.textContent=qSlider.value+'%'; };
 
-document.getElementById('apply-btn').onclick=()=>{
-  pushUndo();
-  const amount=parseInt(qSlider.value)/100;
-  let lines=['QUANTIZE amount='+(amount*100).toFixed(0)+'%  notes='+notes.length];
-  // Quantize pulls each note's CURRENT displayed pitch (n.midi) toward its nearest
-  // grid note by `amount`. Respects manual pitch edits — e.g. if the user moved a
-  // note up a semitone, the target is the grid note near the new position, not the original.
-  notes.forEach((n,i)=>{
-    const before={midiOrig:n.midiOrig,midi:n.midi,tuneOffset:n.tuneOffset};
-    const snapped=snapMidi(n.midi);
-    const delta=snapped-n.midi;
-    n.tuneOffset += delta*amount;       // additive correction on top of any existing
-    n.midi = n.midiOrig + n.tuneOffset; // maintain invariant
-    n.cents=Math.round((n.midi-snapMidi(n.midi))*100);
-    if(i<4) lines.push(
-      '#'+i+' orig='+before.midiOrig.toFixed(2)+' midi='+before.midi.toFixed(2)+'('+midiName(Math.round(before.midi))+')'+
-      ' →target='+midiName(snapped)+' delta='+delta.toFixed(2)+
-      ' off:'+before.tuneOffset.toFixed(2)+'→'+n.tuneOffset.toFixed(2)
-    );
+// Live-preview quantize model:
+//   Each note remembers its `quantizeBase` — the tuneOffset that was set by manual edits
+//   BEFORE the slider started moving. While the slider moves, we set:
+//       tuneOffset = quantizeBase + (target - midiAtBase) * amount
+//   so the slider is a smooth blend from "hand-edited state" (0%) to "on the grid" (100%).
+//   Apply bakes the current state into the new baseline.
+
+function getQuantizeTargets(){
+  // If a note is selected, only that one. Otherwise all notes.
+  return selectedNote?[selectedNote]:notes;
+}
+
+function captureQuantizeBase(targets){
+  targets.forEach(n=>{
+    n.quantizeBase = n.tuneOffset;
+    // also remember midi at base, since n.midi can drift while slider moves
+    n.midiAtBase = n.midi;
+    n.gridTarget = snapMidi(n.midi); // nearest grid note from the hand-edited position
   });
-  dbgShow(lines.join('\n'));
+}
+
+function applyQuantizeAmount(targets,amount){
+  targets.forEach(n=>{
+    if(n.quantizeBase===undefined) return;
+    const delta = n.gridTarget - n.midiAtBase;           // distance to target grid note
+    n.tuneOffset = n.quantizeBase + delta*amount;
+    n.midi       = n.midiOrig + n.tuneOffset;            // keep invariant
+    n.cents      = Math.round((n.midi-snapMidi(n.midi))*100);
+  });
+}
+
+// Snapshot the baseline as soon as the user touches the slider,
+// so the same slider motion always reflects the state at touch-start.
+let qSliderActive=false;
+function startQuantizeSession(){
+  if(qSliderActive) return;
+  qSliderActive=true;
+  captureQuantizeBase(getQuantizeTargets());
+}
+
+qSlider.addEventListener('pointerdown',startQuantizeSession);
+qSlider.addEventListener('touchstart',startQuantizeSession,{passive:true});
+qSlider.addEventListener('focus',startQuantizeSession);
+
+qSlider.oninput=()=>{
+  qVal.textContent=qSlider.value+'%';
+  // Safety: if we somehow didn't capture a base (e.g. keyboard input), capture now.
+  if(!qSliderActive) startQuantizeSession();
+  const amount=parseInt(qSlider.value)/100;
+  applyQuantizeAmount(getQuantizeTargets(),amount);
+  drawEditor();
+  if(selectedNote) updateNotePanel(selectedNote);
+};
+
+// When the user releases the slider, rebuild the audio buffer once (expensive operation,
+// not done on every oninput to keep the slider smooth).
+function commitQuantizePreview(){
+  if(!qSliderActive) return;
+  qSliderActive=false;
+  pushUndo();
   rebuildCorrectedBuffer();
-  refreshNoteList();
+}
+qSlider.addEventListener('pointerup',commitQuantizePreview);
+qSlider.addEventListener('touchend',commitQuantizePreview);
+qSlider.addEventListener('change',commitQuantizePreview);
+
+// "Apply Correction" button: bake the current state as the new baseline.
+// From this point on, the slider will start measuring from this state (not the pre-edit one).
+document.getElementById('apply-btn').onclick=()=>{
+  // Clear any stashed baseline so the next slider session captures the new "current" state.
+  notes.forEach(n=>{ delete n.quantizeBase; delete n.midiAtBase; delete n.gridTarget; });
+  qSliderActive=false;
+  // Reset the slider back to 0% so the user can start a fresh session.
+  qSlider.value=0;
+  qVal.textContent='0%';
+  rebuildCorrectedBuffer();
   drawEditor();
 };
 
