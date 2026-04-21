@@ -573,22 +573,35 @@ function analyzeBuffer(buf){
         end=j; freqSum+=frames[j].freq; count++;
       } else {
         // Pitch departed from center — is it vibrato (oscillates back) or a new note (stays away)?
-        // Count how many of the next N frames stay above the threshold
+        // DIRECTIONAL: track whether the move is UP or DOWN relative to center.
+        // Only frames that stay in the SAME DIRECTION count as confirmation.
+        // This prevents vibrato (which oscillates both ways) from triggering splits,
+        // AND it lets adjacent notes split correctly whether the melody goes up or down.
         const newMidi=frames[j].midi;
         const jumpSize=diff;
+        const direction=Math.sign(newMidi-dynamicCenter); // +1 = up, -1 = down
         const needed=jumpSize<1.5?SP.confirmSm:jumpSize<2.5?SP.confirmMd:SP.confirmLg;
         const lookAhead=needed+4;
-        let stayCount=0, returnCount=0, totalVoiced=0;
+        let stayCount=0, returnCount=0, wrongDirCount=0, totalVoiced=0;
         for(let k=j;k<Math.min(j+lookAhead,frames.length);k++){
           if(!frames[k].voiced) continue;
           totalVoiced++;
-          if(Math.abs(frames[k].midi-newMidi)<=SAME_NOTE) stayCount++;
-          else if(Math.abs(frames[k].midi-dynamicCenter)<=SAME_NOTE) returnCount++;
+          const kDiff=frames[k].midi-dynamicCenter;
+          const kDir=Math.sign(kDiff);
+          // Within tolerance of the new pitch AND still on the same side of center?
+          if(Math.abs(frames[k].midi-newMidi)<=SAME_NOTE && kDir===direction){
+            stayCount++;
+          } else if(Math.abs(kDiff)<=SAME_NOTE){
+            returnCount++;               // oscillated back to center → vibrato-like
+          } else if(kDir!==0 && kDir!==direction){
+            wrongDirCount++;             // crossed to the opposite side → definitely vibrato, not a new note
+          }
         }
-        // Split if: enough stay on new pitch AND staying more than returning
-        // Use ratio so legato transitions (which return briefly) still split
+        // Split if: enough frames stay on the new pitch IN THE SAME DIRECTION,
+        // AND the move isn't dominated by returns-to-center or opposite-side excursions.
         const stayRatio=totalVoiced>0?stayCount/totalVoiced:0;
-        if(stayCount>=needed&&stayRatio>0.5) break;
+        const oscillating=(returnCount+wrongDirCount)>=stayCount; // looks like vibrato
+        if(stayCount>=needed && stayRatio>0.5 && !oscillating) break;
       }
     }
 
@@ -612,8 +625,10 @@ function analyzeBuffer(buf){
     }
   }
 
-  // Pass 5: merge blobs of same note (within 1 semitone, gap < 500ms)
-  // Run twice to catch chains of fragments
+  // Pass 5: merge blobs of same note (fragments of ONE note only — not adjacent scale notes)
+  // Stricter than before: only merge if the two fragments clearly belong to the same pitch.
+  // Two fragments on adjacent semitones (e.g. E3 + F3) must NOT merge.
+  // Run twice to catch chains of fragments.
   for(let pass=0;pass<2;pass++){
     if(notes.length>1){
       const merged=[];
@@ -622,7 +637,13 @@ function analyzeBuffer(buf){
         const next=notes[n];
         const gap=next.startTime-cur.endTime;
         const semDiff=Math.abs(cur.midi-next.midi);
-        if(gap<0.5&&semDiff<=1.0){
+        const sameSnap=snapMidi(cur.midi)===snapMidi(next.midi); // both round to same semitone
+        // Merge only if:
+        //  - small gap, AND
+        //  - pitch difference is well under a semitone (≤ 0.6), AND
+        //  - both fragments snap to the same target note.
+        // This keeps fragments of ONE note together but separates E3 from F3.
+        if(gap<0.3 && semDiff<=0.6 && sameSnap){
           cur.endTime=next.endTime; cur.endSample=next.endSample;
           const avg=(cur.freq+next.freq)/2;
           cur.freq=avg; cur.midi=f2midi(avg); cur.midiOrig=cur.midi;
