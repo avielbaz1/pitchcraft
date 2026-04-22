@@ -199,6 +199,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
     <button class="t-btn" id="undo-btn" title="Undo" disabled>
       <svg viewBox="0 0 24 24"><path d="M3 10h10c3.9 0 7 3.1 7 7v1M3 10l5-5M3 10l5 5" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
     </button>
+    <button class="t-btn" id="return-btn" title="Return to last play position" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="11,17 6,12 11,7"/><polyline points="18,17 13,12 18,7"/></svg>
+    </button>
     <span class="playhead-time" id="ph-time">0:00.0</span>
   </div>
 
@@ -424,7 +427,7 @@ let audioCtx=null;
 let originalBuffer=null;   // decoded AudioBuffer
 let correctedBuffer=null;  // after applying correction
 let sourceNode=null;
-let playStartTime=0,playOffset=0,isPlaying=false;
+let playStartTime=0,playOffset=0,isPlaying=false,lastPlayStart=0;
 let bypassMode=false;
 
 async function processAudio(){
@@ -954,6 +957,7 @@ document.getElementById('t-stop').onclick=()=>{
   stopAudio();
 };
 document.getElementById('undo-btn').onclick=()=>undo();
+document.getElementById('return-btn').onclick=()=>returnToLastPlay();
 document.getElementById('bypass-btn').onclick=()=>{
   bypassMode=!bypassMode;
   document.getElementById('bypass-btn').classList.toggle('on',bypassMode);
@@ -967,6 +971,9 @@ function playAudio(){
   const buf=bypassMode?originalBuffer:correctedBuffer;
   // clamp playOffset so we never start past end
   if(playOffset>=buf.duration) playOffset=0;
+  // remember where this play-pass started (for Return-to-play-position)
+  lastPlayStart=playOffset;
+  document.getElementById('return-btn').disabled=false;
   if(sourceNode){try{sourceNode.disconnect();sourceNode.stop();}catch(e){}}
   sourceNode=audioCtx.createBufferSource();
   sourceNode.buffer=buf;
@@ -1006,12 +1013,35 @@ function pauseAudio(){
 function stopAudio(){
   isPlaying=false;
   playOffset=0;
+  lastPlayStart=0;
+  document.getElementById('return-btn').disabled=true;
   if(sourceNode){sourceNode.onended=null;try{sourceNode.disconnect();sourceNode.stop();}catch(e){}}
   document.getElementById('t-play').classList.remove('active');
   cancelAnimationFrame(rafId);
   rafId=null;
   document.getElementById('ph-time').textContent='0:00.0';
   drawEditor();
+}
+
+// Return playhead to where the last Play started — great for editing loops
+function returnToLastPlay(){
+  const buf=bypassMode?originalBuffer:correctedBuffer;
+  if(!buf)return;
+  const wasPlaying=isPlaying;
+  // stop current playback without resetting to 0
+  if(isPlaying){
+    isPlaying=false;
+    if(sourceNode){sourceNode.onended=null;try{sourceNode.disconnect();sourceNode.stop();}catch(e){}}
+    document.getElementById('t-play').classList.remove('active');
+    cancelAnimationFrame(rafId);
+    rafId=null;
+  }
+  // jump back to the remembered start point
+  playOffset=Math.min(lastPlayStart, buf.duration);
+  document.getElementById('ph-time').textContent=fmtTime(playOffset);
+  drawEditor();
+  // if it was playing, resume from there (seamless loop-back for editing)
+  if(wasPlaying) playAudio();
 }
 
 // ══ NOTE INTERACTION — TAP TO SELECT ═════════════════════════
