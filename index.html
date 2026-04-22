@@ -1023,12 +1023,11 @@ function stopAudio(){
   drawEditor();
 }
 
-// Return playhead to where the last Play started — great for editing loops
+// Return playhead to where the last Play started — pauses at that position
 function returnToLastPlay(){
   const buf=bypassMode?originalBuffer:correctedBuffer;
   if(!buf)return;
-  const wasPlaying=isPlaying;
-  // stop current playback without resetting to 0
+  // stop playback if currently playing
   if(isPlaying){
     isPlaying=false;
     if(sourceNode){sourceNode.onended=null;try{sourceNode.disconnect();sourceNode.stop();}catch(e){}}
@@ -1036,12 +1035,10 @@ function returnToLastPlay(){
     cancelAnimationFrame(rafId);
     rafId=null;
   }
-  // jump back to the remembered start point
+  // jump playhead back to the remembered start point (paused there)
   playOffset=Math.min(lastPlayStart, buf.duration);
   document.getElementById('ph-time').textContent=fmtTime(playOffset);
   drawEditor();
-  // if it was playing, resume from there (seamless loop-back for editing)
-  if(wasPlaying) playAudio();
 }
 
 // ══ NOTE INTERACTION — TAP TO SELECT ═════════════════════════
