@@ -199,7 +199,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
     <button class="t-btn" id="undo-btn" title="Undo" disabled>
       <svg viewBox="0 0 24 24"><path d="M3 10h10c3.9 0 7 3.1 7 7v1M3 10l5-5M3 10l5 5" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
     </button>
-    <button class="t-btn" id="return-btn" title="Return to last play position" disabled>
+    <button class="t-btn" id="return-btn" title="Return-to-play-position mode: pause will snap back to last play start">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="11,17 6,12 11,7"/><polyline points="18,17 13,12 18,7"/></svg>
     </button>
     <span class="playhead-time" id="ph-time">0:00.0</span>
@@ -427,7 +427,7 @@ let audioCtx=null;
 let originalBuffer=null;   // decoded AudioBuffer
 let correctedBuffer=null;  // after applying correction
 let sourceNode=null;
-let playStartTime=0,playOffset=0,isPlaying=false,lastPlayStart=0;
+let playStartTime=0,playOffset=0,isPlaying=false,lastPlayStart=0,returnMode=false;
 let bypassMode=false;
 
 async function processAudio(){
@@ -706,10 +706,14 @@ const pianoCV=document.getElementById('piano-cv');
 const pc=pianoCV.getContext('2d');
 
 const PIANO_W=40;
-const ROW_H=22;// taller rows so blobs have room for text + deviation line
+const ROW_H_DEFAULT=22,PX_PER_SEC_DEFAULT=150;
+let ROW_H=ROW_H_DEFAULT;// taller rows so blobs have room for text + deviation line
 const MIDI_MIN=36,MIDI_MAX=84;// C2 to C6
 const MIDI_RANGE=MIDI_MAX-MIDI_MIN;
-let PX_PER_SEC=150;// zoom — wider spacing between notes
+let PX_PER_SEC=PX_PER_SEC_DEFAULT;// zoom — wider spacing between notes
+// Zoom limits
+const ZOOM_X_MIN=30,ZOOM_X_MAX=1200;// px/sec
+const ZOOM_Y_MIN=8,ZOOM_Y_MAX=64;// px/semitone
 let edH=0,edW=0;
 let selectedNote=null;
 let rafId=null;
@@ -718,6 +722,40 @@ function midiToY(midi){return(MIDI_MAX-midi)*ROW_H;}
 function yToMidi(y){return MIDI_MAX-y/ROW_H;}
 function timeToX(t){return t*PX_PER_SEC;}
 function xToTime(x){return x/PX_PER_SEC;}
+
+// ══ ZOOM SYSTEM ══════════════════════════════════════════════
+// Scale zoom around an anchor point so content under the anchor stays put.
+// anchorX/anchorY are in VIEWPORT coords relative to the scroll container.
+function applyZoom(scaleX,scaleY,anchorX,anchorY){
+  if(!originalBuffer)return;// nothing to zoom
+  // Viewport anchor → content coordinates BEFORE zoom
+  const contentX=edScroll.scrollLeft+anchorX;
+  const contentY=edScroll.scrollTop+anchorY;
+  // In content units (time / midi) so we can re-anchor after zoom
+  const timeAtAnchor=contentX/PX_PER_SEC;
+  const midiYAtAnchor=contentY/ROW_H;// fractional rows from top
+  // Apply scale with clamps
+  const newPxSec=Math.max(ZOOM_X_MIN,Math.min(ZOOM_X_MAX,PX_PER_SEC*scaleX));
+  const newRowH=Math.max(ZOOM_Y_MIN,Math.min(ZOOM_Y_MAX,ROW_H*scaleY));
+  // If both axes clamped and didn't change, bail early
+  if(newPxSec===PX_PER_SEC&&newRowH===ROW_H)return;
+  PX_PER_SEC=newPxSec;
+  ROW_H=newRowH;
+  // Rebuild canvas sizes at new zoom
+  initEditorCanvas();
+  // Re-anchor scroll so the same musical point sits under the cursor/fingers
+  edScroll.scrollLeft=timeAtAnchor*PX_PER_SEC-anchorX;
+  edScroll.scrollTop=midiYAtAnchor*ROW_H-anchorY;
+  drawEditor();
+}
+
+function resetZoom(){
+  if(!originalBuffer)return;
+  PX_PER_SEC=PX_PER_SEC_DEFAULT;
+  ROW_H=ROW_H_DEFAULT;
+  initEditorCanvas();
+  drawEditor();
+}
 
 function initEditorCanvas(){
   const wrap=document.querySelector('.editor-wrap');
@@ -957,7 +995,10 @@ document.getElementById('t-stop').onclick=()=>{
   stopAudio();
 };
 document.getElementById('undo-btn').onclick=()=>undo();
-document.getElementById('return-btn').onclick=()=>returnToLastPlay();
+document.getElementById('return-btn').onclick=()=>{
+  returnMode=!returnMode;
+  document.getElementById('return-btn').classList.toggle('active',returnMode);
+};
 document.getElementById('bypass-btn').onclick=()=>{
   bypassMode=!bypassMode;
   document.getElementById('bypass-btn').classList.toggle('on',bypassMode);
@@ -971,9 +1012,8 @@ function playAudio(){
   const buf=bypassMode?originalBuffer:correctedBuffer;
   // clamp playOffset so we never start past end
   if(playOffset>=buf.duration) playOffset=0;
-  // remember where this play-pass started (for Return-to-play-position)
+  // remember where this play-pass started (for Return-to-play-position mode)
   lastPlayStart=playOffset;
-  document.getElementById('return-btn').disabled=false;
   if(sourceNode){try{sourceNode.disconnect();sourceNode.stop();}catch(e){}}
   sourceNode=audioCtx.createBufferSource();
   sourceNode.buffer=buf;
@@ -984,11 +1024,13 @@ function playAudio(){
     // only handle natural end (not manual stop)
     if(!isPlaying) return;
     isPlaying=false;
-    playOffset=0; // reset to start for next play
+    // In Return-to-play-position mode, snap back to last play start.
+    // Otherwise reset to 0 (default behavior for natural end).
+    playOffset=returnMode?lastPlayStart:0;
     cancelAnimationFrame(rafId);
     rafId=null;
     document.getElementById('t-play').classList.remove('active');
-    document.getElementById('ph-time').textContent='0:00.0';
+    document.getElementById('ph-time').textContent=fmtTime(playOffset);
     drawEditor();
   };
   isPlaying=true;
@@ -1007,37 +1049,22 @@ function pauseAudio(){
   document.getElementById('t-play').classList.remove('active');
   cancelAnimationFrame(rafId);
   rafId=null;
+  // Return-to-play-position mode: snap playhead back to where play started
+  if(returnMode){
+    playOffset=lastPlayStart;
+    document.getElementById('ph-time').textContent=fmtTime(playOffset);
+  }
   drawEditor();
 }
 
 function stopAudio(){
   isPlaying=false;
   playOffset=0;
-  lastPlayStart=0;
-  document.getElementById('return-btn').disabled=true;
   if(sourceNode){sourceNode.onended=null;try{sourceNode.disconnect();sourceNode.stop();}catch(e){}}
   document.getElementById('t-play').classList.remove('active');
   cancelAnimationFrame(rafId);
   rafId=null;
   document.getElementById('ph-time').textContent='0:00.0';
-  drawEditor();
-}
-
-// Return playhead to where the last Play started — pauses at that position
-function returnToLastPlay(){
-  const buf=bypassMode?originalBuffer:correctedBuffer;
-  if(!buf)return;
-  // stop playback if currently playing
-  if(isPlaying){
-    isPlaying=false;
-    if(sourceNode){sourceNode.onended=null;try{sourceNode.disconnect();sourceNode.stop();}catch(e){}}
-    document.getElementById('t-play').classList.remove('active');
-    cancelAnimationFrame(rafId);
-    rafId=null;
-  }
-  // jump playhead back to the remembered start point (paused there)
-  playOffset=Math.min(lastPlayStart, buf.duration);
-  document.getElementById('ph-time').textContent=fmtTime(playOffset);
   drawEditor();
 }
 
@@ -1051,17 +1078,68 @@ function getCanvasXY(clientX,clientY){
   return{x:(clientX-rect.left)+edScroll.scrollLeft,y:(clientY-rect.top)+edScroll.scrollTop};
 }
 
+// ── Touch state: supports single-tap (select) and two-finger pinch (zoom) ──
+let pinchActive=false;
+let pinchStartDistX=0,pinchStartDistY=0,pinchStartDist=0;
+let pinchAnchorX=0,pinchAnchorY=0;
+let pinchStartPxSec=0,pinchStartRowH=0;
+
+function touchMidpoint(t1,t2,rect){
+  return{
+    x:((t1.clientX+t2.clientX)/2)-rect.left,
+    y:((t1.clientY+t2.clientY)/2)-rect.top
+  };
+}
+
 edCanvas.addEventListener('touchstart',(e)=>{
+  if(e.touches.length>=2){
+    // Begin pinch — cancel any tap in progress
+    pinchActive=true;
+    tapMoved=true;// prevent tap on touchend
+    const t1=e.touches[0],t2=e.touches[1];
+    pinchStartDistX=Math.abs(t1.clientX-t2.clientX);
+    pinchStartDistY=Math.abs(t1.clientY-t2.clientY);
+    pinchStartDist=Math.hypot(t1.clientX-t2.clientX,t1.clientY-t2.clientY);
+    const rect=edScroll.getBoundingClientRect();
+    const mid=touchMidpoint(t1,t2,rect);
+    pinchAnchorX=mid.x;pinchAnchorY=mid.y;
+    pinchStartPxSec=PX_PER_SEC;
+    pinchStartRowH=ROW_H;
+    return;
+  }
   const t=e.touches[0];
   tapStartX=t.clientX;tapStartY=t.clientY;tapStartTime=Date.now();tapMoved=false;
 },{passive:true});
 
 edCanvas.addEventListener('touchmove',(e)=>{
+  if(pinchActive&&e.touches.length>=2){
+    e.preventDefault();
+    const t1=e.touches[0],t2=e.touches[1];
+    const curDistX=Math.abs(t1.clientX-t2.clientX);
+    const curDistY=Math.abs(t1.clientY-t2.clientY);
+    // Per-axis ratio — allows asymmetric pinch (more horizontal vs vertical)
+    // Fall back to total distance if one axis is near zero (fingers vertical/horizontal)
+    const totalRatio=pinchStartDist>0?Math.hypot(t1.clientX-t2.clientX,t1.clientY-t2.clientY)/pinchStartDist:1;
+    const rX=pinchStartDistX>8?curDistX/pinchStartDistX:totalRatio;
+    const rY=pinchStartDistY>8?curDistY/pinchStartDistY:totalRatio;
+    // Compute target absolute values (not cumulative) for stable pinch
+    const targetPxSec=Math.max(ZOOM_X_MIN,Math.min(ZOOM_X_MAX,pinchStartPxSec*rX));
+    const targetRowH=Math.max(ZOOM_Y_MIN,Math.min(ZOOM_Y_MAX,pinchStartRowH*rY));
+    const scaleX=targetPxSec/PX_PER_SEC;
+    const scaleY=targetRowH/ROW_H;
+    if(scaleX!==1||scaleY!==1) applyZoom(scaleX,scaleY,pinchAnchorX,pinchAnchorY);
+    return;
+  }
   const t=e.touches[0];
+  if(!t)return;
   if(Math.abs(t.clientX-tapStartX)>12||Math.abs(t.clientY-tapStartY)>12)tapMoved=true;
-},{passive:true});
+},{passive:false});
 
 edCanvas.addEventListener('touchend',(e)=>{
+  if(pinchActive){
+    if(e.touches.length<2){pinchActive=false;tapMoved=true;}
+    return;
+  }
   if(tapMoved||Date.now()-tapStartTime>700)return;
   e.preventDefault();
   e.stopPropagation();
@@ -1080,6 +1158,35 @@ edCanvas.addEventListener('touchend',(e)=>{
   const{x,y}=getCanvasXY(ct.clientX,ct.clientY);
   handleTap(x,y,isDouble);
 },{passive:false});
+
+// ── Desktop wheel zoom: Ctrl+wheel = horizontal, Ctrl+Shift+wheel = vertical ──
+edScroll.addEventListener('wheel',(e)=>{
+  if(!e.ctrlKey&&!e.metaKey)return;// normal scroll otherwise
+  e.preventDefault();
+  const rect=edScroll.getBoundingClientRect();
+  const ax=e.clientX-rect.left;
+  const ay=e.clientY-rect.top;
+  // deltaY < 0 → zoom in. Step size tuned for typical mouse & trackpad.
+  const step=Math.exp(-e.deltaY*0.0015);// smooth log scale, ~1.15x per notch
+  if(e.shiftKey){
+    applyZoom(1,step,ax,ay);// vertical only
+  }else{
+    applyZoom(step,1,ax,ay);// horizontal only (most common)
+  }
+},{passive:false});
+
+// ── Keyboard shortcuts: Ctrl/Cmd +/-/0 ──
+document.addEventListener('keydown',(e)=>{
+  if(!(e.ctrlKey||e.metaKey))return;
+  if(document.getElementById('ed-screen').classList.contains('hidden'))return;// only in editor
+  const rect=edScroll.getBoundingClientRect();
+  // Anchor to viewport center for keyboard zoom
+  const ax=rect.width/2,ay=rect.height/2;
+  if(e.key==='='||e.key==='+'){e.preventDefault();applyZoom(1.25,1.25,ax,ay);}
+  else if(e.key==='-'||e.key==='_'){e.preventDefault();applyZoom(1/1.25,1/1.25,ax,ay);}
+  else if(e.key==='0'){e.preventDefault();resetZoom();}
+});
+
 
 // desktop mouse only — ignored if touch already handled
 let lastTouchEndTime=0;
