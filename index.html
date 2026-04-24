@@ -231,8 +231,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
       </div>
       <div class="np-multi-actions">
         <button class="np-multi-btn accent" id="np-multi-snap">snap all</button>
-        <button class="np-multi-btn" id="np-multi-pitch-up">+1st all</button>
-        <button class="np-multi-btn" id="np-multi-pitch-dn">-1st all</button>
         <button class="np-multi-btn" id="np-multi-desel">deselect</button>
       </div>
     </div>
@@ -1470,6 +1468,12 @@ function showNotePanel(n){
   npControls.style.display='flex';
   updateNotePanel(n);
   refreshNoteList();
+  // Jump playhead to the selected note's start time
+  if(!isPlaying && originalBuffer){
+    playOffset=Math.max(0,Math.min(n.startTime, originalBuffer.duration));
+    document.getElementById('ph-time').textContent=fmtTime(playOffset);
+    drawEditor();
+  }
   playNote(n);
 }
 function showMultiPanel(sel){
@@ -1506,28 +1510,6 @@ document.getElementById('np-multi-snap').onclick=()=>{
     const delta=target-n.midi;
     n.tuneOffset+=delta;
     n.midi=n.midiOrig+n.tuneOffset;
-    updateNoteCents(n);
-  });
-  rebuildCorrectedBuffer();
-  drawEditor();
-};
-document.getElementById('np-multi-pitch-up').onclick=()=>{
-  const sel=notes.filter(n=>n.selected);
-  if(!sel.length)return;
-  pushUndo();
-  sel.forEach(n=>{
-    n.tuneOffset+=1;
-    updateNoteCents(n);
-  });
-  rebuildCorrectedBuffer();
-  drawEditor();
-};
-document.getElementById('np-multi-pitch-dn').onclick=()=>{
-  const sel=notes.filter(n=>n.selected);
-  if(!sel.length)return;
-  pushUndo();
-  sel.forEach(n=>{
-    n.tuneOffset-=1;
     updateNoteCents(n);
   });
   rebuildCorrectedBuffer();
