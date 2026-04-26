@@ -133,6 +133,10 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
 .np-multi-btn:hover{border-color:var(--accent);color:var(--accent)}
 .np-multi-btn.accent{background:var(--accent);border-color:var(--accent);color:#fff}
 .np-multi-btn.accent:hover{background:#4a78e0}
+/* ── Minimap ── */
+.minimap-bar{display:none;position:relative;height:28px;background:var(--s1);border-bottom:1px solid var(--border);flex-shrink:0;overflow:hidden;cursor:pointer;user-select:none}
+.minimap-bar canvas{position:absolute;top:0;left:0;width:100%;height:100%;image-rendering:pixelated}
+.minimap-viewport{position:absolute;top:0;height:100%;background:rgba(91,138,245,0.18);border:1px solid rgba(91,138,245,0.6);border-radius:2px;pointer-events:none;box-sizing:border-box}
 </style>
 </head>
 <body>
@@ -211,6 +215,12 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="11,17 6,12 11,7"/><polyline points="18,17 13,12 18,7"/></svg>
     </button>
     <span class="playhead-time" id="ph-time">0:00.0</span>
+  </div>
+
+  <!-- ── Minimap / overview strip ── -->
+  <div class="minimap-bar" id="minimap-bar">
+    <canvas id="minimap-cv"></canvas>
+    <div class="minimap-viewport" id="minimap-vp"></div>
   </div>
 
   <div class="editor-wrap">
@@ -479,7 +489,12 @@ async function loadAudioFromUrl(url,name){
   qSliderActive=false;
   buildEditor();
   showScreen('ed-screen');
-  requestAnimationFrame(()=>{initEditorCanvas();drawEditor();});
+  requestAnimationFrame(()=>{
+    PX_PER_SEC=getZoomXMin(); // start at fit-to-screen zoom
+    initEditorCanvas();
+    drawEditor();
+    updateMinimap();
+  });
 }
 
 function cloneBuffer(src){
@@ -727,13 +742,13 @@ const pc=pianoCV.getContext('2d');
 
 const PIANO_W=40;
 const ROW_H_DEFAULT=22,PX_PER_SEC_DEFAULT=150;
-let ROW_H=ROW_H_DEFAULT;// taller rows so blobs have room for text + deviation line
-const MIDI_MIN=36,MIDI_MAX=84;// C2 to C6
+let ROW_H=ROW_H_DEFAULT;
+const MIDI_MIN=36,MIDI_MAX=84;
 const MIDI_RANGE=MIDI_MAX-MIDI_MIN;
-let PX_PER_SEC=PX_PER_SEC_DEFAULT;// zoom — wider spacing between notes
-// Zoom limits
-const ZOOM_X_MIN=30,ZOOM_X_MAX=1200;// px/sec
-const ZOOM_Y_MIN=8,ZOOM_Y_MAX=64;// px/semitone
+let PX_PER_SEC=PX_PER_SEC_DEFAULT;
+// Zoom limits — min is computed dynamically (fit-to-width), max is capped to avoid blank canvas
+const ZOOM_X_MAX=600;  // max px/sec (was 1200 — too wide)
+const ZOOM_Y_MIN=14,ZOOM_Y_MAX=40;  // tighter vertical range
 let edH=0,edW=0;
 let selectedNote=null;   // last single-tapped note (single-select mode)
 let rafId=null;
@@ -751,35 +766,40 @@ function xToTime(x){return x/PX_PER_SEC;}
 // ══ ZOOM SYSTEM ══════════════════════════════════════════════
 // Scale zoom around an anchor point so content under the anchor stays put.
 // anchorX/anchorY are in VIEWPORT coords relative to the scroll container.
+function getZoomXMin(){
+  // Minimum zoom = fit the full audio duration into the visible scroll area
+  if(!originalBuffer) return 30;
+  const visW=edScroll.clientWidth||300;
+  return Math.max(20, (visW-80)/originalBuffer.duration);
+}
+
 function applyZoom(scaleX,scaleY,anchorX,anchorY){
-  if(!originalBuffer)return;// nothing to zoom
-  // Viewport anchor → content coordinates BEFORE zoom
+  if(!originalBuffer)return;
   const contentX=edScroll.scrollLeft+anchorX;
   const contentY=edScroll.scrollTop+anchorY;
-  // In content units (time / midi) so we can re-anchor after zoom
   const timeAtAnchor=contentX/PX_PER_SEC;
-  const midiYAtAnchor=contentY/ROW_H;// fractional rows from top
-  // Apply scale with clamps
-  const newPxSec=Math.max(ZOOM_X_MIN,Math.min(ZOOM_X_MAX,PX_PER_SEC*scaleX));
+  const midiYAtAnchor=contentY/ROW_H;
+  const newPxSec=Math.max(getZoomXMin(),Math.min(ZOOM_X_MAX,PX_PER_SEC*scaleX));
   const newRowH=Math.max(ZOOM_Y_MIN,Math.min(ZOOM_Y_MAX,ROW_H*scaleY));
-  // If both axes clamped and didn't change, bail early
   if(newPxSec===PX_PER_SEC&&newRowH===ROW_H)return;
   PX_PER_SEC=newPxSec;
   ROW_H=newRowH;
-  // Rebuild canvas sizes at new zoom
   initEditorCanvas();
-  // Re-anchor scroll so the same musical point sits under the cursor/fingers
   edScroll.scrollLeft=timeAtAnchor*PX_PER_SEC-anchorX;
   edScroll.scrollTop=midiYAtAnchor*ROW_H-anchorY;
   drawEditor();
+  updateMinimap();
 }
 
 function resetZoom(){
   if(!originalBuffer)return;
-  PX_PER_SEC=PX_PER_SEC_DEFAULT;
+  // Reset to fit-to-screen horizontally, default vertical
+  PX_PER_SEC=getZoomXMin();
   ROW_H=ROW_H_DEFAULT;
   initEditorCanvas();
+  edScroll.scrollLeft=0;
   drawEditor();
+  updateMinimap();
 }
 
 function initEditorCanvas(){
@@ -816,6 +836,91 @@ function initEditorCanvas(){
 
   document.getElementById('ed-dur').textContent=fmtTime(originalBuffer?originalBuffer.duration:0);
 }
+
+// ══ MINIMAP ═══════════════════════════════════════════════════
+const minimapBar=document.getElementById('minimap-bar');
+const minimapCv=document.getElementById('minimap-cv');
+const minimapVp=document.getElementById('minimap-vp');
+let mc=null; // minimap canvas context
+
+function updateMinimap(){
+  if(!originalBuffer||!notes.length){
+    minimapBar.style.display='none';
+    return;
+  }
+  minimapBar.style.display='block';
+  const bw=minimapBar.clientWidth||300;
+  const bh=28;
+  minimapCv.width=bw;
+  minimapCv.height=bh;
+  mc=minimapCv.getContext('2d');
+
+  const dur=originalBuffer.duration;
+  const scaleT=bw/dur; // px per second in minimap
+
+  // Background
+  mc.fillStyle='#12121e';
+  mc.fillRect(0,0,bw,bh);
+
+  // Draw note blobs as tiny rectangles — color by deviation
+  const mRange=MIDI_MAX-MIDI_MIN;
+  notes.forEach(n=>{
+    const x=n.startTime*scaleT;
+    const w=Math.max(2,(n.endTime-n.startTime)*scaleT);
+    const cents=Math.abs((n.midi-Math.round(n.midi))*100);
+    const t=Math.min(1,cents/50);
+    const r=Math.round(91+t*(220-91));
+    const g=Math.round(138+t*(80-138));
+    const b=Math.round(245+t*(80-245));
+    const y=bh-(((n.midi-MIDI_MIN)/mRange)*bh)-2;
+    mc.fillStyle=`rgba(${r},${g},${b},0.85)`;
+    mc.fillRect(x,Math.max(0,y-2),w,4);
+  });
+
+  updateMinimapViewport();
+}
+
+function updateMinimapViewport(){
+  if(!originalBuffer)return;
+  const bw=minimapBar.clientWidth||300;
+  const dur=originalBuffer.duration;
+  const scaleT=bw/dur;
+  // Viewport rect in time
+  const visStart=edScroll.scrollLeft/PX_PER_SEC;
+  const visDur=edScroll.clientWidth/PX_PER_SEC;
+  const left=Math.max(0,visStart*scaleT);
+  const width=Math.max(8,Math.min(bw-left, visDur*scaleT));
+  minimapVp.style.left=left+'px';
+  minimapVp.style.width=width+'px';
+}
+
+// Minimap click/drag to jump
+let mmDragging=false;
+function minimapSeek(e){
+  const rect=minimapBar.getBoundingClientRect();
+  const cx=(e.touches?e.touches[0].clientX:e.clientX)-rect.left;
+  const frac=Math.max(0,Math.min(1,cx/rect.width));
+  const dur=originalBuffer?originalBuffer.duration:1;
+  const targetTime=frac*dur;
+  // Center viewport on that time
+  const targetScroll=targetTime*PX_PER_SEC-(edScroll.clientWidth/2);
+  edScroll.scrollLeft=Math.max(0,targetScroll);
+  if(!isPlaying){
+    playOffset=targetTime;
+    document.getElementById('ph-time').textContent=fmtTime(playOffset);
+    drawEditor();
+  }
+  updateMinimapViewport();
+}
+minimapBar.addEventListener('mousedown',(e)=>{mmDragging=true;minimapSeek(e);e.preventDefault();},{passive:false});
+window.addEventListener('mousemove',(e)=>{if(mmDragging)minimapSeek(e);});
+window.addEventListener('mouseup',()=>{mmDragging=false;});
+minimapBar.addEventListener('touchstart',(e)=>{mmDragging=true;minimapSeek(e);},{passive:true});
+minimapBar.addEventListener('touchmove',(e)=>{if(mmDragging)minimapSeek(e);},{passive:true});
+minimapBar.addEventListener('touchend',()=>{mmDragging=false;});
+
+// Update viewport indicator on scroll
+edScroll.addEventListener('scroll',()=>{updateMinimapViewport();},{ passive:true});
 
 function drawPiano(){
   const totalH=MIDI_RANGE*ROW_H;
@@ -1909,6 +2014,7 @@ function rebuildCorrectedBuffer(){
       }
     }
   });
+  updateMinimap();
 }
 
 // ══ EXPORT ═══════════════════════════════════════════════════
@@ -1959,7 +2065,7 @@ function fmtTime(t){
 // handle window resize
 window.addEventListener('resize',()=>{
   if(!document.getElementById('ed-screen').classList.contains('hidden')){
-    initEditorCanvas();drawEditor();
+    initEditorCanvas();drawEditor();updateMinimap();
   }
 });
 </script>
