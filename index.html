@@ -1449,34 +1449,43 @@ function hitTest(x,y){
 let rbMouseActive=false;
 edCanvas.addEventListener('mousedown',(e)=>{
   if(Date.now()-lastTouchEndTime<500)return;
-  // Only start rubber-band when NOT clicking a note (hitTest handles click)
+  if(e.button!==0)return;
   const{x,y}=getCanvasXY(e.clientX,e.clientY);
-  if(hitTest(x,y))return; // let click handler deal with note taps
+  if(hitTest(x,y))return;
   rbMouseActive=true;
   dragSelActive=true;
   dragSelStartX=x;dragSelStartY=y;
   dragSelCurX=x;dragSelCurY=y;
   dragSelStartClientX=e.clientX;dragSelStartClientY=e.clientY;
   if(!e.shiftKey){
-    // clear selection at drag-start unless shift held (additive drag)
     notes.forEach(n=>n.selected=false);
     selectedNote=null;
   }
+  // Lock scroll so drag doesn't pan the canvas
+  edScroll.style.overflow='hidden';
   e.preventDefault();
 },{passive:false});
 
+// Block scroll on edScroll while rubber-band is active
+edScroll.addEventListener('wheel',(e)=>{
+  if(rbMouseActive) e.stopPropagation();
+},{passive:false,capture:true});
+
 window.addEventListener('mousemove',(e)=>{
   if(!rbMouseActive||!dragSelActive)return;
+  // Prevent the scroll container from scrolling during rubber-band drag
+  e.preventDefault();
   const{x,y}=getCanvasXY(e.clientX,e.clientY);
   dragSelCurX=x;dragSelCurY=y;
   drawEditor();
-});
+},{passive:false});
 
 window.addEventListener('mouseup',(e)=>{
   if(!rbMouseActive)return;
   rbMouseActive=false;
   dragSelActive=false;
-  // Commit selection: any note whose blob overlaps the rect gets selected
+  // Restore scroll
+  edScroll.style.overflow='auto';
   const rx0=Math.min(dragSelStartX,dragSelCurX);
   const rx1=Math.max(dragSelStartX,dragSelCurX);
   const ry0=Math.min(dragSelStartY,dragSelCurY);
@@ -1485,16 +1494,12 @@ window.addEventListener('mouseup',(e)=>{
   if(dragged){
     const BLOB_H=ROW_H*1.8;
     notes.forEach(n=>{
-      const em=n.midi;
       const nx0=timeToX(n.startTime);
       const nx1=Math.max(nx0+12,timeToX(n.endTime));
-      const cy=midiToY(em)+ROW_H/2;
+      const cy=midiToY(n.midi)+ROW_H/2;
       const ny0=cy-BLOB_H/2;
       const ny1=cy+BLOB_H/2;
-      // rect overlap test
-      if(nx1>=rx0&&nx0<=rx1&&ny1>=ry0&&ny0<=ry1){
-        n.selected=true;
-      }
+      if(nx1>=rx0&&nx0<=rx1&&ny1>=ry0&&ny0<=ry1) n.selected=true;
     });
     refreshSelectionPanel();
   }
