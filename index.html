@@ -490,7 +490,7 @@ async function loadAudioFromUrl(url,name){
   buildEditor();
   showScreen('ed-screen');
   requestAnimationFrame(()=>{
-    PX_PER_SEC=getZoomXMin(); // start at fit-to-screen zoom
+    PX_PER_SEC=PX_PER_SEC_DEFAULT;
     initEditorCanvas();
     drawEditor();
     updateMinimap();
@@ -746,9 +746,10 @@ let ROW_H=ROW_H_DEFAULT;
 const MIDI_MIN=36,MIDI_MAX=84;
 const MIDI_RANGE=MIDI_MAX-MIDI_MIN;
 let PX_PER_SEC=PX_PER_SEC_DEFAULT;
-// Zoom limits — min is computed dynamically (fit-to-width), max is capped to avoid blank canvas
-const ZOOM_X_MAX=600;  // max px/sec (was 1200 — too wide)
-const ZOOM_Y_MIN=14,ZOOM_Y_MAX=40;  // tighter vertical range
+// Zoom limits
+const ZOOM_X_MAX=600;   // max px/sec
+const ZOOM_X_MIN=20;    // min px/sec — allows zooming out to see full file
+const ZOOM_Y_MIN=14,ZOOM_Y_MAX=40;
 let edH=0,edW=0;
 let selectedNote=null;   // last single-tapped note (single-select mode)
 let rafId=null;
@@ -767,10 +768,7 @@ function xToTime(x){return x/PX_PER_SEC;}
 // Scale zoom around an anchor point so content under the anchor stays put.
 // anchorX/anchorY are in VIEWPORT coords relative to the scroll container.
 function getZoomXMin(){
-  // Minimum zoom = fit the full audio duration into the visible scroll area
-  if(!originalBuffer) return 30;
-  const visW=edScroll.clientWidth||300;
-  return Math.max(20, (visW-80)/originalBuffer.duration);
+  return ZOOM_X_MIN;
 }
 
 function applyZoom(scaleX,scaleY,anchorX,anchorY){
@@ -793,8 +791,7 @@ function applyZoom(scaleX,scaleY,anchorX,anchorY){
 
 function resetZoom(){
   if(!originalBuffer)return;
-  // Reset to fit-to-screen horizontally, default vertical
-  PX_PER_SEC=getZoomXMin();
+  PX_PER_SEC=PX_PER_SEC_DEFAULT;
   ROW_H=ROW_H_DEFAULT;
   initEditorCanvas();
   edScroll.scrollLeft=0;
