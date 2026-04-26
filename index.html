@@ -1355,7 +1355,10 @@ document.addEventListener('keydown',(e)=>{
 let lastTouchEndTime=0;
 edCanvas.addEventListener('touchend',()=>{lastTouchEndTime=Date.now();},{passive:true});
 edCanvas.addEventListener('click',(e)=>{
-  if(Date.now()-lastTouchEndTime<500)return; // skip ghost click after touch
+  if(Date.now()-lastTouchEndTime<500)return;
+  // Suppress click if it was the end of a rubber-band drag
+  const dragDist=Math.hypot(e.clientX-dragSelStartClientX, e.clientY-dragSelStartClientY);
+  if(dragDist>6)return;
   const now=Date.now();
   const timeDiff=now-lastTapTime;
   const distOk=Math.abs(e.clientX-lastTapClientX)<DOUBLE_TAP_PX&&
@@ -1451,7 +1454,11 @@ edCanvas.addEventListener('mousedown',(e)=>{
   if(Date.now()-lastTouchEndTime<500)return;
   if(e.button!==0)return;
   const{x,y}=getCanvasXY(e.clientX,e.clientY);
-  if(hitTest(x,y))return;
+  if(hitTest(x,y)){
+    // Reset drag origin so click suppression won't fire after a note tap
+    dragSelStartClientX=e.clientX;dragSelStartClientY=e.clientY;
+    return;
+  }
   rbMouseActive=true;
   dragSelActive=true;
   dragSelStartX=x;dragSelStartY=y;
@@ -1461,7 +1468,6 @@ edCanvas.addEventListener('mousedown',(e)=>{
     notes.forEach(n=>n.selected=false);
     selectedNote=null;
   }
-  // Lock scroll so drag doesn't pan the canvas
   edScroll.style.overflow='hidden';
   e.preventDefault();
 },{passive:false});
