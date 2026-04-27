@@ -1595,13 +1595,19 @@ const npPitchVal=document.getElementById('np-pitch-val');
 const npVibSl=document.getElementById('np-vib-sl');
 const npVibVal=document.getElementById('np-vib-val');
 
+function resetQSlider(){
+  qSliderActive=false;
+  qSlider.value=0;
+  qVal.textContent='0%';
+  notes.forEach(n=>{ delete n.quantizeBase; delete n.midiAtBase; delete n.gridTarget; });
+}
 function showNotePanel(n){
   npEmpty.style.display='none';
   npMulti.style.display='none';
   npControls.style.display='flex';
+  resetQSlider();
   updateNotePanel(n);
   refreshNoteList();
-  // Jump playhead to the selected note's start time
   if(!isPlaying && originalBuffer){
     playOffset=Math.max(0,Math.min(n.startTime, originalBuffer.duration));
     document.getElementById('ph-time').textContent=fmtTime(playOffset);
@@ -1613,6 +1619,7 @@ function showMultiPanel(sel){
   npEmpty.style.display='none';
   npControls.style.display='none';
   npMulti.style.display='block';
+  resetQSlider();
   document.getElementById('np-multi-count').textContent=sel.length+' notes';
 }
 function hideNotePanel(){
