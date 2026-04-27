@@ -1144,19 +1144,16 @@ document.getElementById('return-btn').onclick=()=>{
   returnMode=!returnMode;
   document.getElementById('return-btn').classList.toggle('active',returnMode);
 };
-document.getElementById('bypass-btn').onclick=()=>{
+function doBypass(){
   const wasPlaying=isPlaying;
-  let dbg='wasPlaying='+wasPlaying+'\nplayOffset='+playOffset.toFixed(3)+'\nstartTime='+playStartTime.toFixed(3)+'\ncurrentTime='+(audioCtx?audioCtx.currentTime.toFixed(3):'n/a');
-
   if(sourceNode) sourceNode.onended=null;
 
   if(wasPlaying){
     const elapsed=audioCtx.currentTime-playStartTime;
     const curDur=(bypassMode?originalBuffer:correctedBuffer).duration;
     playOffset=Math.min(curDur, playOffset+elapsed);
-    dbg+='\nelapsed='+elapsed.toFixed(3)+'\nnewOffset='+playOffset.toFixed(3);
     isPlaying=false;
-    try{sourceNode.disconnect();sourceNode.stop();}catch(e){dbg+='\nstopErr:'+e;}
+    try{sourceNode.disconnect();sourceNode.stop();}catch(e){}
     cancelAnimationFrame(rafId);rafId=null;
   }
 
@@ -1166,16 +1163,16 @@ document.getElementById('bypass-btn').onclick=()=>{
   if(wasPlaying){
     const newDur=(bypassMode?originalBuffer:correctedBuffer).duration;
     playOffset=Math.min(playOffset, newDur-0.01);
-    dbg+='\nplayAudio offset='+playOffset.toFixed(3);
     playAudio();
   }
+}
 
-  // Show debug overlay
-  let ov=document.getElementById('_dbg');
-  if(!ov){ov=document.createElement('div');ov.id='_dbg';ov.style.cssText='position:fixed;top:10px;left:10px;right:10px;background:#000;color:#0f0;font-size:13px;font-family:monospace;padding:12px;border-radius:8px;z-index:9999;white-space:pre;border:1px solid #0f0';document.body.appendChild(ov);}
-  ov.textContent=dbg;
-  setTimeout(()=>{if(ov)ov.remove();},6000);
-};
+const bypassBtn=document.getElementById('bypass-btn');
+bypassBtn.onclick=doBypass;
+bypassBtn.addEventListener('touchend',(e)=>{
+  e.preventDefault();
+  doBypass();
+},{passive:false});
 
 function playAudio(){
   if(!audioCtx||(!originalBuffer&&!correctedBuffer))return;
@@ -1193,11 +1190,6 @@ function playAudio(){
   playStartTime=audioCtx.currentTime;
   sourceNode.start(0,playOffset);
   sourceNode.onended=()=>{
-    // Show if onended fires unexpectedly
-    let ov=document.getElementById('_dbg');
-    if(!ov){ov=document.createElement('div');ov.id='_dbg';ov.style.cssText='position:fixed;top:10px;left:10px;right:10px;background:#000;color:#f80;font-size:13px;font-family:monospace;padding:12px;border-radius:8px;z-index:9999;white-space:pre;border:1px solid #f80';document.body.appendChild(ov);}
-    ov.textContent='onended fired!\nisPlaying='+isPlaying+'\nplayOffset='+playOffset.toFixed(3);
-    setTimeout(()=>{if(ov)ov.remove();},6000);
     if(!isPlaying) return;
     isPlaying=false;
     playOffset=returnMode?lastPlayStart:0;
