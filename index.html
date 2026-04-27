@@ -1147,7 +1147,14 @@ document.getElementById('return-btn').onclick=()=>{
 document.getElementById('bypass-btn').onclick=()=>{
   bypassMode=!bypassMode;
   document.getElementById('bypass-btn').classList.toggle('on',bypassMode);
-  if(isPlaying){stopAudio();playAudio();}
+  if(isPlaying){
+    // Preserve playhead position when switching buffers
+    const buf=bypassMode?originalBuffer:correctedBuffer;
+    // clamp to new buffer duration but don't reset to 0
+    playOffset=Math.min(playOffset, buf.duration-0.01);
+    stopAudio();
+    playAudio();
+  }
 };
 
 function playAudio(){
@@ -1155,8 +1162,8 @@ function playAudio(){
   // resume context if suspended (iOS requirement)
   if(audioCtx.state==='suspended') audioCtx.resume();
   const buf=bypassMode?originalBuffer:correctedBuffer;
-  // clamp playOffset so we never start past end
-  if(playOffset>=buf.duration) playOffset=0;
+  // clamp playOffset to buffer duration — never reset to 0 just because we switched buffers
+  if(playOffset>=buf.duration) playOffset=Math.max(0, buf.duration-0.01);
   // remember where this play-pass started (for Return-to-play-position mode)
   lastPlayStart=playOffset;
   if(sourceNode){try{sourceNode.disconnect();sourceNode.stop();}catch(e){}}
@@ -1880,6 +1887,7 @@ let qSliderActive=false;
 function startQuantizeSession(){
   if(qSliderActive) return;
   qSliderActive=true;
+  pushUndo(); // snapshot BEFORE any quantize changes happen
   captureQuantizeBase(getQuantizeTargets());
 }
 
@@ -1894,17 +1902,14 @@ qSlider.oninput=()=>{
   applyQuantizeAmount(getQuantizeTargets(),amount);
   drawEditor();
   if(selectedNote) updateNotePanel(selectedNote);
-  // refresh multi panel count label if in multi mode
   const sel=notes.filter(n=>n.selected);
   if(sel.length>1) document.getElementById('np-multi-count').textContent=sel.length+' notes';
 };
 
-// When the user releases the slider, rebuild the audio buffer once (expensive operation,
-// not done on every oninput to keep the slider smooth).
 function commitQuantizePreview(){
   if(!qSliderActive) return;
   qSliderActive=false;
-  pushUndo();
+  // undo was already pushed at session start — just rebuild audio
   rebuildCorrectedBuffer();
 }
 qSlider.addEventListener('pointerup',commitQuantizePreview);
