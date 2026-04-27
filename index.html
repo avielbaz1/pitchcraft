@@ -241,7 +241,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
       </div>
       <div class="np-multi-actions">
         <button class="np-multi-btn accent" id="np-multi-snap">snap all</button>
-        <button class="np-multi-btn" id="np-multi-desel">deselect</button>
       </div>
     </div>
     <div class="note-panel-controls" id="note-panel-controls" style="display:none">
@@ -1624,12 +1623,6 @@ function hideNotePanel(){
 
 // ── Multi-select panel buttons ──
 document.getElementById('np-multi-close').onclick=()=>{
-  notes.forEach(n=>n.selected=false);
-  selectedNote=null;
-  hideNotePanel();
-  drawEditor();
-};
-document.getElementById('np-multi-desel').onclick=()=>{
   notes.forEach(n=>n.selected=false);
   selectedNote=null;
   hideNotePanel();
