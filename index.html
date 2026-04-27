@@ -1146,16 +1146,17 @@ document.getElementById('return-btn').onclick=()=>{
 };
 document.getElementById('bypass-btn').onclick=()=>{
   const wasPlaying=isPlaying;
-  // Null onended FIRST — prevents race condition on Android
+  let dbg='wasPlaying='+wasPlaying+'\nplayOffset='+playOffset.toFixed(3)+'\nstartTime='+playStartTime.toFixed(3)+'\ncurrentTime='+(audioCtx?audioCtx.currentTime.toFixed(3):'n/a');
+
   if(sourceNode) sourceNode.onended=null;
 
   if(wasPlaying){
-    // Capture position using the CURRENT (pre-toggle) buffer duration
     const elapsed=audioCtx.currentTime-playStartTime;
     const curDur=(bypassMode?originalBuffer:correctedBuffer).duration;
     playOffset=Math.min(curDur, playOffset+elapsed);
+    dbg+='\nelapsed='+elapsed.toFixed(3)+'\nnewOffset='+playOffset.toFixed(3);
     isPlaying=false;
-    try{sourceNode.disconnect();sourceNode.stop();}catch(e){}
+    try{sourceNode.disconnect();sourceNode.stop();}catch(e){dbg+='\nstopErr:'+e;}
     cancelAnimationFrame(rafId);rafId=null;
   }
 
@@ -1163,11 +1164,17 @@ document.getElementById('bypass-btn').onclick=()=>{
   document.getElementById('bypass-btn').classList.toggle('on',bypassMode);
 
   if(wasPlaying){
-    // Clamp to new buffer duration and resume
     const newDur=(bypassMode?originalBuffer:correctedBuffer).duration;
     playOffset=Math.min(playOffset, newDur-0.01);
+    dbg+='\nplayAudio offset='+playOffset.toFixed(3);
     playAudio();
   }
+
+  // Show debug overlay
+  let ov=document.getElementById('_dbg');
+  if(!ov){ov=document.createElement('div');ov.id='_dbg';ov.style.cssText='position:fixed;top:10px;left:10px;right:10px;background:#000;color:#0f0;font-size:13px;font-family:monospace;padding:12px;border-radius:8px;z-index:9999;white-space:pre;border:1px solid #0f0';document.body.appendChild(ov);}
+  ov.textContent=dbg;
+  setTimeout(()=>{if(ov)ov.remove();},6000);
 };
 
 function playAudio(){
@@ -1186,11 +1193,13 @@ function playAudio(){
   playStartTime=audioCtx.currentTime;
   sourceNode.start(0,playOffset);
   sourceNode.onended=()=>{
-    // only handle natural end (not manual stop)
+    // Show if onended fires unexpectedly
+    let ov=document.getElementById('_dbg');
+    if(!ov){ov=document.createElement('div');ov.id='_dbg';ov.style.cssText='position:fixed;top:10px;left:10px;right:10px;background:#000;color:#f80;font-size:13px;font-family:monospace;padding:12px;border-radius:8px;z-index:9999;white-space:pre;border:1px solid #f80';document.body.appendChild(ov);}
+    ov.textContent='onended fired!\nisPlaying='+isPlaying+'\nplayOffset='+playOffset.toFixed(3);
+    setTimeout(()=>{if(ov)ov.remove();},6000);
     if(!isPlaying) return;
     isPlaying=false;
-    // In Return-to-play-position mode, snap back to last play start.
-    // Otherwise reset to 0 (default behavior for natural end).
     playOffset=returnMode?lastPlayStart:0;
     cancelAnimationFrame(rafId);
     rafId=null;
