@@ -1145,14 +1145,27 @@ document.getElementById('return-btn').onclick=()=>{
   document.getElementById('return-btn').classList.toggle('active',returnMode);
 };
 document.getElementById('bypass-btn').onclick=()=>{
+  const wasPlaying=isPlaying;
+  // Null onended FIRST — prevents race condition on Android
+  if(sourceNode) sourceNode.onended=null;
+
+  if(wasPlaying){
+    // Capture position using the CURRENT (pre-toggle) buffer duration
+    const elapsed=audioCtx.currentTime-playStartTime;
+    const curDur=(bypassMode?originalBuffer:correctedBuffer).duration;
+    playOffset=Math.min(curDur, playOffset+elapsed);
+    isPlaying=false;
+    try{sourceNode.disconnect();sourceNode.stop();}catch(e){}
+    cancelAnimationFrame(rafId);rafId=null;
+  }
+
   bypassMode=!bypassMode;
   document.getElementById('bypass-btn').classList.toggle('on',bypassMode);
-  if(isPlaying){
-    // Preserve playhead position when switching buffers
-    const buf=bypassMode?originalBuffer:correctedBuffer;
-    // clamp to new buffer duration but don't reset to 0
-    playOffset=Math.min(playOffset, buf.duration-0.01);
-    stopAudio();
+
+  if(wasPlaying){
+    // Clamp to new buffer duration and resume
+    const newDur=(bypassMode?originalBuffer:correctedBuffer).duration;
+    playOffset=Math.min(playOffset, newDur-0.01);
     playAudio();
   }
 };
