@@ -1146,7 +1146,9 @@ document.getElementById('reset-all-btn').onclick=()=>{
   notes.forEach(n=>n.selected=false);
   hideNotePanel();
   rebuildCorrectedBuffer();
-  if(resetAll) initEditorCanvas();
+  // Force full canvas repaint — clear any stale pixels outside new MIDI range
+  edCanvas.width=edCanvas.width; // reassigning width clears the entire canvas
+  initEditorCanvas();
   drawEditor();
   updateMinimap();
 };
