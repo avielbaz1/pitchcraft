@@ -493,6 +493,7 @@ async function loadAudioFromUrl(url,name){
   showScreen('ed-screen');
   requestAnimationFrame(()=>{
     PX_PER_SEC=PX_PER_SEC_DEFAULT;
+    updateMidiRange();
     initEditorCanvas();
     drawEditor();
     updateMinimap();
@@ -536,10 +537,10 @@ function undo(){
   if(!undoStack.length)return;
   notes=undoStack.pop();
   if(!undoStack.length) document.getElementById('undo-btn').disabled=true;
-  // deselect all
   notes.forEach(n=>n.selected=false);
   selectedNote=null;
   hideNotePanel();
+  updateMidiRange();
   rebuildCorrectedBuffer();
   drawEditor();
 }
@@ -745,8 +746,17 @@ const pc=pianoCV.getContext('2d');
 const PIANO_W=40;
 const ROW_H_DEFAULT=22,PX_PER_SEC_DEFAULT=150;
 let ROW_H=ROW_H_DEFAULT;
-const MIDI_MIN=36,MIDI_MAX=84;
-const MIDI_RANGE=MIDI_MAX-MIDI_MIN;
+let MIDI_MIN=36,MIDI_MAX=84;
+let MIDI_RANGE=MIDI_MAX-MIDI_MIN;
+
+function updateMidiRange(){
+  if(!notes.length){ MIDI_MIN=36;MIDI_MAX=84;MIDI_RANGE=48;return; }
+  const lo=Math.floor(Math.min(...notes.map(n=>n.midi)))-3; // 3 semitone padding
+  const hi=Math.ceil( Math.max(...notes.map(n=>n.midi)))+3;
+  MIDI_MIN=Math.max(0,  lo);
+  MIDI_MAX=Math.min(127,hi);
+  MIDI_RANGE=MIDI_MAX-MIDI_MIN;
+}
 let PX_PER_SEC=PX_PER_SEC_DEFAULT;
 // Zoom limits
 const ZOOM_X_MAX=600;   // max px/sec
