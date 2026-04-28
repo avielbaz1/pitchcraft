@@ -1145,7 +1145,9 @@ document.getElementById('reset-all-btn').onclick=()=>{
   notes.forEach(n=>n.selected=false);
   hideNotePanel();
   rebuildCorrectedBuffer();
+  if(resetAll) initEditorCanvas();
   drawEditor();
+  updateMinimap();
 };
 document.getElementById('return-btn').onclick=()=>{
   returnMode=!returnMode;
