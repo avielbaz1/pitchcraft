@@ -1039,7 +1039,8 @@ function hexToRgb(hex){
 function drawEditor(){
   if(!originalBuffer)return;
   const totalH=MIDI_RANGE*ROW_H;
-  ec.clearRect(0,0,edW,totalH);
+  // Clear the FULL canvas (not just totalH) to avoid stale pixels after zoom/reset
+  ec.clearRect(0,0,edCanvas.width,edCanvas.height);
 
   // ── background grid ──
   for(let m=MIDI_MIN;m<MIDI_MAX;m++){
