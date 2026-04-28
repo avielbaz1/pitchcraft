@@ -1118,17 +1118,32 @@ function drawEditor(){
 document.getElementById('undo-btn').onclick=()=>undo();
 document.getElementById('reset-all-btn').onclick=()=>{
   if(!originalNotes.length)return;
+  const sel=notes.filter(n=>n.selected);
+  const resetAll=sel.length===0;
+
   pushUndo();
-  // Full restore — deep clone of original notes (pre any split/merge/pitch/vibrato edits)
-  notes=originalNotes.map(n=>({...n}));
-  undoStack=[];
-  document.getElementById('undo-btn').disabled=true;
+
+  if(resetAll){
+    // Full restore — back to original notes (pre any split/merge/pitch/vibrato)
+    notes=originalNotes.map(n=>({...n}));
+    undoStack=[];
+    document.getElementById('undo-btn').disabled=true;
+    updateMidiRange();
+  } else {
+    // Restore only selected notes from the original snapshot
+    sel.forEach(n=>{
+      const orig=originalNotes.find(o=>o.startSample===n.startSample);
+      if(!orig)return;
+      Object.assign(n, {...orig, selected:true});
+    });
+  }
+
   qSliderActive=false;
   qSlider.value=0;
   qVal.textContent='0%';
   selectedNote=null;
+  notes.forEach(n=>n.selected=false);
   hideNotePanel();
-  updateMidiRange();
   rebuildCorrectedBuffer();
   drawEditor();
 };
