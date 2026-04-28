@@ -1143,6 +1143,7 @@ document.getElementById('reset-all-btn').onclick=()=>{
     notes.sort((a,b)=>a.startTime-b.startTime);
   }
 
+  const savedOffset=playOffset;
   qSliderActive=false;
   qSlider.value=0;
   qVal.textContent='0%';
@@ -1152,7 +1153,11 @@ document.getElementById('reset-all-btn').onclick=()=>{
   rebuildCorrectedBuffer();
   edCanvas.width=edCanvas.width;
   initEditorCanvas();
+  const savedScroll=edScroll.scrollLeft;
+  playOffset=savedOffset;
+  document.getElementById('ph-time').textContent=fmtTime(playOffset);
   drawEditor();
+  edScroll.scrollLeft=savedScroll;
   updateMinimap();
 };
 document.getElementById('return-btn').onclick=()=>{
