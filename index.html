@@ -695,7 +695,8 @@ function analyzeBuffer(buf){
         freq:avgFreq, midi, midiOrig:midi,
         tuneOffset:0,
         cents:Math.round((midi-snapped)*100),
-        selected:false, vibratoReduction:0
+        selected:false, vibratoReduction:0,
+        originalStartSample:frames[i].samplePos  // never changes — used by Reset All
       });
       i=end+1;
     } else {
@@ -1125,18 +1126,21 @@ document.getElementById('reset-all-btn').onclick=()=>{
   pushUndo();
 
   if(resetAll){
-    // Full restore — back to original notes (pre any split/merge/pitch/vibrato)
     notes=originalNotes.map(n=>({...n}));
     undoStack=[];
     document.getElementById('undo-btn').disabled=true;
     updateMidiRange();
   } else {
-    // Restore only selected notes from the original snapshot
-    sel.forEach(n=>{
-      const orig=originalNotes.find(o=>o.startSample===n.startSample);
-      if(!orig)return;
-      Object.assign(n, {...orig, selected:true});
+    // Collect originalStartSamples of selected notes
+    const selOriginals=new Set(sel.map(n=>n.originalStartSample??n.startSample));
+    // Remove all current notes that share an originalStartSample with selected
+    notes=notes.filter(n=>!selOriginals.has(n.originalStartSample??n.startSample));
+    // Re-insert the original note for each matched originalStartSample
+    selOriginals.forEach(oss=>{
+      const orig=originalNotes.find(o=>(o.originalStartSample??o.startSample)===oss);
+      if(orig) notes.push({...orig});
     });
+    notes.sort((a,b)=>a.startTime-b.startTime);
   }
 
   qSliderActive=false;
@@ -1146,8 +1150,7 @@ document.getElementById('reset-all-btn').onclick=()=>{
   notes.forEach(n=>n.selected=false);
   hideNotePanel();
   rebuildCorrectedBuffer();
-  // Force full canvas repaint — clear any stale pixels outside new MIDI range
-  edCanvas.width=edCanvas.width; // reassigning width clears the entire canvas
+  edCanvas.width=edCanvas.width;
   initEditorCanvas();
   drawEditor();
   updateMinimap();
@@ -1824,21 +1827,22 @@ document.getElementById('np-split').onclick=()=>{
   const first={...n,
     endTime:midTime, endSample:midSample,
     midiOrig:firstOrig,
-    midi:firstOrig,              // midi = midiOrig + 0
+    midi:firstOrig,
     freq:midi2f(firstOrig),
     cents:Math.round((firstOrig-snapMidi(firstOrig))*100),
-    tuneOffset:0, selected:false
+    tuneOffset:0, selected:false,
+    originalStartSample:n.originalStartSample??n.startSample
   };
 
-  // Second half
   const secondOrig=secondMidiOrig!==null?secondMidiOrig:n.midiOrig;
   const second={...n,
     startTime:midTime, startSample:midSample,
     midiOrig:secondOrig,
-    midi:secondOrig,             // midi = midiOrig + 0
+    midi:secondOrig,
     freq:midi2f(secondOrig),
     cents:Math.round((secondOrig-snapMidi(secondOrig))*100),
-    tuneOffset:0, selected:true
+    tuneOffset:0, selected:true,
+    originalStartSample:n.originalStartSample??n.startSample
   };
   notes.splice(idx,1,first,second);
   selectedNote=second;
