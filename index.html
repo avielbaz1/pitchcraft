@@ -80,7 +80,6 @@ select{width:100%;background:var(--s2);border:1px solid var(--border);color:var(
 
 /* piano roll + editor canvas */
 .editor-wrap{flex:1;display:flex;overflow:hidden;position:relative}
-.piano{width:36px;flex-shrink:0;background:var(--s1);border-right:1px solid var(--border);overflow:hidden;position:relative}
 .editor-scroll{flex:1;overflow:auto;position:relative;cursor:crosshair}
 #ed-canvas{display:block;cursor:crosshair}
 
@@ -227,7 +226,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
   </div>
 
   <div class="editor-wrap">
-    <canvas class="piano" id="piano-cv"></canvas>
     <div class="editor-scroll" id="ed-scroll">
       <canvas id="ed-canvas"></canvas>
     </div>
@@ -740,10 +738,7 @@ function analyzeBuffer(buf){
 const edScroll=document.getElementById('ed-scroll');
 const edCanvas=document.getElementById('ed-canvas');
 const ec=edCanvas.getContext('2d');
-const pianoCV=document.getElementById('piano-cv');
-const pc=pianoCV.getContext('2d');
-
-const PIANO_W=40;
+const PIANO_W=0;
 const ROW_H_DEFAULT=22,PX_PER_SEC_DEFAULT=150;
 let ROW_H=ROW_H_DEFAULT;
 let MIDI_MIN=36,MIDI_MAX=84;
@@ -824,13 +819,6 @@ function initEditorCanvas(){
   edCanvas.style.width=edW+'px';
   edCanvas.style.height=totalH+'px';
   edCanvas.style.display='block';
-
-  pianoCV.width=PIANO_W;
-  pianoCV.height=totalH;
-  pianoCV.style.width=PIANO_W+'px';
-  pianoCV.style.height=totalH+'px';
-
-  drawPiano();
 
   // scroll to center on actual detected notes, fallback to C4
   let centerMidi=60;
@@ -930,52 +918,6 @@ minimapBar.addEventListener('touchend',()=>{mmDragging=false;});
 
 // Update viewport indicator on scroll
 edScroll.addEventListener('scroll',()=>{updateMinimapViewport();},{ passive:true});
-
-function drawPiano(){
-  const totalH=MIDI_RANGE*ROW_H;
-  pc.clearRect(0,0,PIANO_W,totalH);
-
-  for(let m=MIDI_MIN;m<MIDI_MAX;m++){
-    const y=midiToY(m);
-    const note=NOTES[((m%12)+12)%12];
-    const isC=note==='C';
-    const isBlack=note.includes('#');
-
-    // Row background — slightly lighter for natural notes, darker for sharps
-    pc.fillStyle=isBlack?'#13131f':'#1c1c2e';
-    pc.fillRect(0,y,PIANO_W,ROW_H-1);
-
-    // Subtle divider between rows
-    pc.fillStyle='rgba(255,255,255,0.04)';
-    pc.fillRect(0,y+ROW_H-1,PIANO_W,1);
-
-    // Only draw labels when rows are tall enough to show them
-    if(ROW_H>=12){
-      if(isC){
-        // C notes: full label C3, C4… with accent line
-        pc.fillStyle='rgba(91,138,245,0.25)';
-        pc.fillRect(0,y,PIANO_W,ROW_H-1);
-        pc.fillStyle='rgba(91,138,245,0.8)';
-        pc.fillRect(0,y,2,ROW_H-1); // left accent bar
-        pc.fillStyle='rgba(180,200,255,0.9)';
-        pc.font=`bold ${Math.min(10,ROW_H-3)}px Space Mono,monospace`;
-        pc.textAlign='right';
-        pc.fillText('C'+(Math.floor(m/12)-1), PIANO_W-3, y+ROW_H-3);
-      } else if(!isBlack && ROW_H>=16){
-        // Other natural notes: show name only when rows are large enough
-        pc.fillStyle='rgba(140,150,180,0.55)';
-        pc.font=`${Math.min(9,ROW_H-4)}px Space Mono,monospace`;
-        pc.textAlign='right';
-        pc.fillText(note, PIANO_W-3, y+ROW_H-3);
-      }
-    } else if(isC){
-      // When rows are very small, just a colored C marker line
-      pc.fillStyle='rgba(91,138,245,0.5)';
-      pc.fillRect(0,y,PIANO_W,1);
-    }
-  }
-  pc.textAlign='left'; // reset
-}
 
 function noteColor(n){
   // n.cents is already the effective cents deviation (includes tuneOffset via updateNoteCents).
