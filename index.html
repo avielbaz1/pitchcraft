@@ -478,6 +478,8 @@ async function loadAudioFromUrl(url,name){
   document.getElementById('proc-text').textContent='detecting notes...';
   await new Promise(r=>setTimeout(r,50));
   analyzeBuffer(originalBuffer);
+  // Save a deep snapshot of the freshly-analysed notes for Reset All
+  originalNotes=notes.map(n=>({...n}));
   // Reset quantize slider for the new recording — no leftover state from a previous session
   const qs=document.getElementById('q-slider');
   const qv=document.getElementById('q-val');
@@ -519,6 +521,7 @@ function getSensParams(){
   };
 }
 let notes=[];
+let originalNotes=[];  // snapshot after analysis — used by Reset All
 let undoStack=[];// array of notes snapshots
 
 function pushUndo(){
@@ -1114,21 +1117,18 @@ function drawEditor(){
 }
 document.getElementById('undo-btn').onclick=()=>undo();
 document.getElementById('reset-all-btn').onclick=()=>{
-  if(!notes.length)return;
+  if(!originalNotes.length)return;
   pushUndo();
-  notes.forEach(n=>{
-    n.tuneOffset=0;
-    n.midi=n.midiOrig;
-    n.vibratoReduction=0;
-    updateNoteCents(n);
-  });
-  notes.forEach(n=>{ delete n.quantizeBase; delete n.midiAtBase; delete n.gridTarget; });
+  // Full restore — deep clone of original notes (pre any split/merge/pitch/vibrato edits)
+  notes=originalNotes.map(n=>({...n}));
+  undoStack=[];
+  document.getElementById('undo-btn').disabled=true;
   qSliderActive=false;
   qSlider.value=0;
   qVal.textContent='0%';
   selectedNote=null;
-  notes.forEach(n=>n.selected=false);
   hideNotePanel();
+  updateMidiRange();
   rebuildCorrectedBuffer();
   drawEditor();
 };
