@@ -1144,6 +1144,7 @@ document.getElementById('reset-all-btn').onclick=()=>{
   }
 
   const savedOffset=playOffset;
+  const savedScroll=edScroll.scrollLeft;  // save BEFORE initEditorCanvas resets it
   qSliderActive=false;
   qSlider.value=0;
   qVal.textContent='0%';
@@ -1153,12 +1154,12 @@ document.getElementById('reset-all-btn').onclick=()=>{
   rebuildCorrectedBuffer();
   edCanvas.width=edCanvas.width;
   initEditorCanvas();
-  const savedScroll=edScroll.scrollLeft;
   playOffset=savedOffset;
   document.getElementById('ph-time').textContent=fmtTime(playOffset);
   drawEditor();
-  edScroll.scrollLeft=savedScroll;
   updateMinimap();
+  // Restore scroll on next frame — Android needs the delay
+  requestAnimationFrame(()=>{ edScroll.scrollLeft=savedScroll; });
 };
 document.getElementById('return-btn').onclick=()=>{
   returnMode=!returnMode;
