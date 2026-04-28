@@ -924,18 +924,47 @@ edScroll.addEventListener('scroll',()=>{updateMinimapViewport();},{ passive:true
 function drawPiano(){
   const totalH=MIDI_RANGE*ROW_H;
   pc.clearRect(0,0,PIANO_W,totalH);
+
   for(let m=MIDI_MIN;m<MIDI_MAX;m++){
     const y=midiToY(m);
     const note=NOTES[((m%12)+12)%12];
+    const isC=note==='C';
     const isBlack=note.includes('#');
-    pc.fillStyle=isBlack?'#1a1a2e':'#2a2a40';
+
+    // Row background — slightly lighter for natural notes, darker for sharps
+    pc.fillStyle=isBlack?'#13131f':'#1c1c2e';
     pc.fillRect(0,y,PIANO_W,ROW_H-1);
-    if(!isBlack&&note==='C'){
-      pc.fillStyle='rgba(255,255,255,0.4)';
-      pc.font='8px Space Mono';
-      pc.fillText('C'+(Math.floor(m/12)-1),2,y+ROW_H-3);
+
+    // Subtle divider between rows
+    pc.fillStyle='rgba(255,255,255,0.04)';
+    pc.fillRect(0,y+ROW_H-1,PIANO_W,1);
+
+    // Only draw labels when rows are tall enough to show them
+    if(ROW_H>=12){
+      if(isC){
+        // C notes: full label C3, C4… with accent line
+        pc.fillStyle='rgba(91,138,245,0.25)';
+        pc.fillRect(0,y,PIANO_W,ROW_H-1);
+        pc.fillStyle='rgba(91,138,245,0.8)';
+        pc.fillRect(0,y,2,ROW_H-1); // left accent bar
+        pc.fillStyle='rgba(180,200,255,0.9)';
+        pc.font=`bold ${Math.min(10,ROW_H-3)}px Space Mono,monospace`;
+        pc.textAlign='right';
+        pc.fillText('C'+(Math.floor(m/12)-1), PIANO_W-3, y+ROW_H-3);
+      } else if(!isBlack && ROW_H>=16){
+        // Other natural notes: show name only when rows are large enough
+        pc.fillStyle='rgba(140,150,180,0.55)';
+        pc.font=`${Math.min(9,ROW_H-4)}px Space Mono,monospace`;
+        pc.textAlign='right';
+        pc.fillText(note, PIANO_W-3, y+ROW_H-3);
+      }
+    } else if(isC){
+      // When rows are very small, just a colored C marker line
+      pc.fillStyle='rgba(91,138,245,0.5)';
+      pc.fillRect(0,y,PIANO_W,1);
     }
   }
+  pc.textAlign='left'; // reset
 }
 
 function noteColor(n){
