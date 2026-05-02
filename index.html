@@ -2098,7 +2098,20 @@ function rebuildCorrectedBuffer(){
         const frac=srcIdx-si;
         tmp[i]=si+1<src.length?(1-frac)*src[si]+frac*src[si+1]:src[Math.min(si,src.length-1)];
         srcPos+=r;
-        if(srcPos>=segLen) srcPos=segLen-1; // clamp so we don't read past the note end
+        if(srcPos>=segLen) srcPos=segLen-1;
+      }
+
+      // ── Time-stretch tmp back to segLen so duration is preserved ──
+      // This prevents desync with video when pitch is shifted.
+      // Simple linear interpolation stretch — sufficient for small pitch shifts.
+      const shiftedLen=srcPos; // how many input samples were actually consumed
+      const stretched=new Float32Array(segLen);
+      const stretchRatio=shiftedLen/segLen;
+      for(let i=0;i<segLen;i++){
+        const sp=i*stretchRatio;
+        const si2=Math.floor(sp);
+        const fr=sp-si2;
+        stretched[i]=si2+1<tmp.length?(1-fr)*tmp[si2]+fr*tmp[si2+1]:tmp[Math.min(si2,tmp.length-1)];
       }
 
       // vibrato reduction: blend toward segment-average pitch (smoothed copy)
@@ -2109,16 +2122,16 @@ function rebuildCorrectedBuffer(){
       const fadeIn=Math.min(FADE,segLen/2);
       for(let i=0;i<fadeIn;i++){
         const t=i/fadeIn;
-        dst[start+i]=src[start+i]*(1-t)+tmp[i]*t;
+        dst[start+i]=src[start+i]*(1-t)+stretched[i]*t;
       }
       // middle
-      for(let i=fadeIn;i<segLen-fadeIn;i++) dst[start+i]=tmp[i];
+      for(let i=fadeIn;i<segLen-fadeIn;i++) dst[start+i]=stretched[i];
       // crossfade at end
       const fadeOut=Math.min(FADE,segLen/2);
       for(let i=0;i<fadeOut;i++){
         const t=i/fadeOut;
         const pos=segLen-fadeOut+i;
-        dst[start+pos]=tmp[pos]*(1-t)+src[start+pos]*t;
+        dst[start+pos]=stretched[pos]*(1-t)+src[start+pos]*t;
       }
     }
   });
