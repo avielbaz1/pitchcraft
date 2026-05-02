@@ -2179,6 +2179,7 @@ document.getElementById('export-video-btn').onclick=async()=>{
     const fps=30;
     const frameInterval=1/fps;
     const totalFrames=Math.ceil(duration*fps);
+    const audioBuf=bypassMode?originalBuffer:correctedBuffer;
 
     // ── Set up mp4-muxer ──
     const{Muxer,ArrayBufferTarget}=window.Mp4Muxer;
@@ -2190,46 +2191,79 @@ document.getElementById('export-video-btn').onclick=async()=>{
       fastStart:'in-memory',
     });
 
-    // ── Set up VideoEncoder ──
-    // Find supported H.264 profile
-    const videoCodecCandidates=[
-      'avc1.42E01E', // H.264 Baseline 3.0
-      'avc1.42001E', // H.264 Baseline 3.0 alt
-      'avc1.4D001E', // H.264 Main 3.0
-      'avc1.64001E', // H.264 High 3.0
-    ];
+    // ── Set up VideoEncoder — try codecs directly ──
+    const vw2=vw%2===0?vw:vw-1; // must be even
+    const vh2=vh%2===0?vh:vh-1;
+
+    const tryVideoCodec=async(codecStr)=>{
+      return new Promise((res)=>{
+        try{
+          const enc=new VideoEncoder({
+            output:()=>{},
+            error:()=>res(false)
+          });
+          enc.configure({codec:codecStr,width:vw2,height:vh2,bitrate:4_000_000,framerate:fps});
+          // Give it 200ms to fail
+          setTimeout(()=>{
+            const ok=enc.state==='configured';
+            if(ok) enc.close();
+            res(ok);
+          },200);
+        }catch(e){ res(false); }
+      });
+    };
+
+    const h264Profiles=['avc1.42E01E','avc1.42001E','avc1.4D001E','avc1.64001E','avc1.420028','avc1.42003e'];
     let videoCodecStr=null;
-    for(const c of videoCodecCandidates){
-      try{
-        const support=await VideoEncoder.isConfigSupported({codec:c,width:vw,height:vh,bitrate:6_000_000,framerate:fps});
-        if(support.supported){videoCodecStr=c;break;}
-      }catch(e){}
+    for(const c of h264Profiles){
+      if(await tryVideoCodec(c)){videoCodecStr=c;break;}
     }
-    if(!videoCodecStr) throw new Error('No supported H.264 codec found in this browser.');
+
+    // Fallback to VP8 in WebM if H.264 not available
+    let useWebM=false;
+    if(!videoCodecStr){
+      if(await tryVideoCodec('vp8')){videoCodecStr='vp8';useWebM=true;}
+      else if(await tryVideoCodec('vp09.00.10.08')){videoCodecStr='vp09.00.10.08';useWebM=true;}
+      else throw new Error('No supported video codec found. Please use Chrome 94+ on desktop.');
+    }
+
+    // Re-create muxer if using WebM
+    let muxerFinal=muxer;
+    let targetFinal=target;
+    if(useWebM){
+      const{Muxer:M2,ArrayBufferTarget:T2}=window.Mp4Muxer;
+      targetFinal=new T2();
+      muxerFinal=new M2({
+        target:targetFinal,
+        video:{codec:'V_VP8',width:vw2,height:vh2,frameRate:fps},
+        audio:{codec:'A_OPUS',sampleRate:audioBuf.sampleRate,numberOfChannels:audioBuf.numberOfChannels},
+        type:'webm',
+      });
+    }
 
     let videoEncoderError=null;
     const videoEncoder=new VideoEncoder({
-      output:(chunk,meta)=>muxer.addVideoChunk(chunk,meta),
-      error:e=>{ videoEncoderError=e; console.error('VideoEncoder error:',e); }
+      output:(chunk,meta)=>muxerFinal.addVideoChunk(chunk,meta),
+      error:e=>{ videoEncoderError=e; }
     });
     videoEncoder.configure({
       codec:videoCodecStr,
-      width:vw, height:vh,
-      bitrate:6_000_000,
+      width:vw2, height:vh2,
+      bitrate:4_000_000,
       framerate:fps,
     });
-    // Verify encoder is open
-    if(videoEncoder.state!=='configured') throw new Error('VideoEncoder failed to configure.');
+    await new Promise(r=>setTimeout(r,100));
+    if(videoEncoder.state!=='configured') throw new Error(`VideoEncoder failed for codec ${videoCodecStr}`);
 
     // ── Set up AudioEncoder ──
-    const audioBuf=bypassMode?originalBuffer:correctedBuffer;
+    const audioCodecStr=useWebM?'opus':'mp4a.40.2';
     let audioEncoderError=null;
     const audioEncoder=new AudioEncoder({
-      output:(chunk,meta)=>muxer.addAudioChunk(chunk,meta),
+      output:(chunk,meta)=>muxerFinal.addAudioChunk(chunk,meta),
       error:e=>{ audioEncoderError=e; console.error('AudioEncoder error:',e); }
     });
     audioEncoder.configure({
-      codec:'mp4a.40.2',
+      codec:audioCodecStr,
       sampleRate:audioBuf.sampleRate,
       numberOfChannels:audioBuf.numberOfChannels,
       bitrate:192000,
@@ -2268,7 +2302,7 @@ document.getElementById('export-video-btn').onclick=async()=>{
     // ── Encode video frame by frame (seek + capture) ──
     statusEl.textContent='encoding video... 0%';
     const canvas=document.createElement('canvas');
-    canvas.width=vw; canvas.height=vh;
+    canvas.width=vw2; canvas.height=vh2;
     const ctx2d=canvas.getContext('2d');
 
     for(let f=0;f<totalFrames;f++){
@@ -2279,7 +2313,7 @@ document.getElementById('export-video-btn').onclick=async()=>{
         vid.addEventListener('seeked',h);
         setTimeout(res,500); // safety fallback
       });
-      ctx2d.drawImage(vid,0,0,vw,vh);
+      ctx2d.drawImage(vid,0,0,vw2,vh2);
 
       const frame=new VideoFrame(canvas,{
         timestamp:Math.round(t*1_000_000),
@@ -2298,18 +2332,20 @@ document.getElementById('export-video-btn').onclick=async()=>{
     await videoEncoder.flush();
 
     // ── Finalize ──
-    statusEl.textContent='finalizing MP4...';
-    muxer.finalize();
+    statusEl.textContent='finalizing...';
+    muxerFinal.finalize();
     URL.revokeObjectURL(videoURL);
 
     // ── Download ──
-    const{buffer}=target;
-    const blob=new Blob([buffer],{type:'video/mp4'});
+    const outExt=useWebM?'webm':'mp4';
+    const outMime=useWebM?'video/webm':'video/mp4';
+    const{buffer}=targetFinal;
+    const blob=new Blob([buffer],{type:outMime});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
     a.href=url;
     const base=videoSourceFile.name.replace(/\.[^.]+$/,'');
-    a.download=`${base}_pitchcraft.mp4`;
+    a.download=`${base}_pitchcraft.${outExt}`;
     a.click();
     setTimeout(()=>URL.revokeObjectURL(url),60000);
 
