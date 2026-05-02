@@ -2249,7 +2249,7 @@ document.getElementById('export-video-btn').onclick=async()=>{
     videoEncoder.configure({
       codec:videoCodecStr,
       width:vw2, height:vh2,
-      bitrate:4_000_000,
+      bitrate:8_000_000,
       framerate:fps,
     });
     await new Promise(r=>setTimeout(r,100));
@@ -2307,11 +2307,13 @@ document.getElementById('export-video-btn').onclick=async()=>{
 
     for(let f=0;f<totalFrames;f++){
       const t=f*frameInterval;
+
+      // Seek to exact time
       vid.currentTime=t;
       await new Promise(res=>{
         const h=()=>{ vid.removeEventListener('seeked',h); res(); };
         vid.addEventListener('seeked',h);
-        setTimeout(res,500); // safety fallback
+        setTimeout(res,800); // safety fallback
       });
       ctx2d.drawImage(vid,0,0,vw2,vh2);
 
@@ -2319,17 +2321,28 @@ document.getElementById('export-video-btn').onclick=async()=>{
         timestamp:Math.round(t*1_000_000),
         duration:Math.round(frameInterval*1_000_000),
       });
+      // Keyframe every 2 seconds for smooth seeking in output
       videoEncoder.encode(frame,{keyFrame:f%60===0});
       frame.close();
       if(videoEncoderError) throw videoEncoderError;
 
-      // Update progress every 5 frames
-      if(f%5===0){
+      // Backpressure: wait if encoder queue is full
+      while(videoEncoder.encodeQueueSize>10){
+        await new Promise(r=>setTimeout(r,20));
+      }
+
+      // Update progress every 3 frames
+      if(f%3===0){
         statusEl.textContent=`encoding video... ${Math.round((f/totalFrames)*100)}%`;
-        await new Promise(r=>setTimeout(r,0)); // yield to UI
+        await new Promise(r=>setTimeout(r,0));
       }
     }
+
+    // Wait for all frames to finish encoding
+    statusEl.textContent='finishing encode...';
     await videoEncoder.flush();
+    // Give muxer time to process all chunks
+    await new Promise(r=>setTimeout(r,500));
 
     // ── Finalize ──
     statusEl.textContent='finalizing...';
