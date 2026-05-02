@@ -2191,31 +2191,50 @@ document.getElementById('export-video-btn').onclick=async()=>{
     });
 
     // ── Set up VideoEncoder ──
-    let videoEncoderDone=false;
+    // Find supported H.264 profile
+    const videoCodecCandidates=[
+      'avc1.42E01E', // H.264 Baseline 3.0
+      'avc1.42001E', // H.264 Baseline 3.0 alt
+      'avc1.4D001E', // H.264 Main 3.0
+      'avc1.64001E', // H.264 High 3.0
+    ];
+    let videoCodecStr=null;
+    for(const c of videoCodecCandidates){
+      try{
+        const support=await VideoEncoder.isConfigSupported({codec:c,width:vw,height:vh,bitrate:6_000_000,framerate:fps});
+        if(support.supported){videoCodecStr=c;break;}
+      }catch(e){}
+    }
+    if(!videoCodecStr) throw new Error('No supported H.264 codec found in this browser.');
+
+    let videoEncoderError=null;
     const videoEncoder=new VideoEncoder({
       output:(chunk,meta)=>muxer.addVideoChunk(chunk,meta),
-      error:e=>{ throw e; }
+      error:e=>{ videoEncoderError=e; console.error('VideoEncoder error:',e); }
     });
     videoEncoder.configure({
-      codec:'avc1.42001f',  // H.264 Baseline
+      codec:videoCodecStr,
       width:vw, height:vh,
       bitrate:6_000_000,
       framerate:fps,
-      latencyMode:'quality',
     });
+    // Verify encoder is open
+    if(videoEncoder.state!=='configured') throw new Error('VideoEncoder failed to configure.');
 
     // ── Set up AudioEncoder ──
     const audioBuf=bypassMode?originalBuffer:correctedBuffer;
+    let audioEncoderError=null;
     const audioEncoder=new AudioEncoder({
       output:(chunk,meta)=>muxer.addAudioChunk(chunk,meta),
-      error:e=>{ throw e; }
+      error:e=>{ audioEncoderError=e; console.error('AudioEncoder error:',e); }
     });
     audioEncoder.configure({
-      codec:'mp4a.40.2',  // AAC-LC
+      codec:'mp4a.40.2',
       sampleRate:audioBuf.sampleRate,
       numberOfChannels:audioBuf.numberOfChannels,
       bitrate:192000,
     });
+    if(audioEncoder.state!=='configured') throw new Error('AudioEncoder failed to configure.');
 
     // ── Encode audio first (AudioData from buffer) ──
     statusEl.textContent='encoding audio...';
@@ -2268,6 +2287,7 @@ document.getElementById('export-video-btn').onclick=async()=>{
       });
       videoEncoder.encode(frame,{keyFrame:f%60===0});
       frame.close();
+      if(videoEncoderError) throw videoEncoderError;
 
       // Update progress every 5 frames
       if(f%5===0){
