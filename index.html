@@ -2135,230 +2135,104 @@ document.getElementById('export-btn').onclick=()=>{
   const a=document.createElement('a');a.href=url;a.download='pitchcraft_export.wav';a.click();
 };
 
-// ── Video export — MP4 via mp4-muxer (pure JS, no WASM, no special headers) ──
+// ── Video export — realtime playback + MediaRecorder (perfect sync, no WASM) ──
 document.getElementById('export-video-btn').onclick=async()=>{
   if(!videoSourceFile||!correctedBuffer)return;
   const overlay=document.getElementById('ffmpeg-overlay');
   const statusEl=document.getElementById('ffmpeg-status');
   const subEl=document.getElementById('ffmpeg-sub');
   overlay.style.display='flex';
-  subEl.textContent='';
+  subEl.textContent='do not close this window';
 
   try{
-    // ── Load mp4-muxer from CDN (tiny ~50KB, pure JS) ──
-    if(!window.Mp4Muxer){
-      statusEl.textContent='loading MP4 encoder...';
-      subEl.textContent='downloading ~50KB library';
-      await new Promise((res,rej)=>{
-        const s=document.createElement('script');
-        s.src='https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.min.js';
-        s.onload=res;
-        s.onerror=()=>rej(new Error('Could not load mp4-muxer. Check internet connection.'));
-        document.head.appendChild(s);
-      });
-    }
+    const audioBuf=bypassMode?originalBuffer:correctedBuffer;
+    const duration=audioBuf.duration;
 
-    // Check WebCodecs support
-    if(!window.VideoEncoder||!window.AudioEncoder){
-      throw new Error('Your browser does not support VideoEncoder/AudioEncoder (WebCodecs). Please use Chrome 94+ or Edge 94+.');
-    }
-
-    statusEl.textContent='preparing video...';
-    subEl.textContent='';
-
-    // ── Load video metadata ──
+    // ── 1. Video element (muted — audio from WebAudio) ──
+    statusEl.textContent='loading video...';
     const videoURL=URL.createObjectURL(videoSourceFile);
     const vid=document.createElement('video');
     vid.src=videoURL; vid.muted=true; vid.preload='auto';
     await new Promise((res,rej)=>{
-      vid.onloadedmetadata=res;
+      vid.oncanplaythrough=res;
       vid.onerror=()=>rej(new Error('Cannot read video file'));
+      setTimeout(res,5000);
     });
-    const duration=vid.duration;
+
+    // ── 2. Canvas (same size as video) ──
     const vw=vid.videoWidth||1280, vh=vid.videoHeight||720;
-    const fps=30;
-    const frameInterval=1/fps;
-    const totalFrames=Math.ceil(duration*fps);
-    const audioBuf=bypassMode?originalBuffer:correctedBuffer;
-
-    // ── Set up mp4-muxer ──
-    const{Muxer,ArrayBufferTarget}=window.Mp4Muxer;
-    const target=new ArrayBufferTarget();
-    const muxer=new Muxer({
-      target,
-      video:{codec:'avc',width:vw,height:vh,frameRate:fps},
-      audio:{codec:'aac',sampleRate:correctedBuffer.sampleRate,numberOfChannels:correctedBuffer.numberOfChannels},
-      fastStart:'in-memory',
-    });
-
-    // ── Set up VideoEncoder — try codecs directly ──
-    const vw2=vw%2===0?vw:vw-1; // must be even
-    const vh2=vh%2===0?vh:vh-1;
-
-    const tryVideoCodec=async(codecStr)=>{
-      return new Promise((res)=>{
-        try{
-          const enc=new VideoEncoder({
-            output:()=>{},
-            error:()=>res(false)
-          });
-          enc.configure({codec:codecStr,width:vw2,height:vh2,bitrate:4_000_000,framerate:fps});
-          // Give it 200ms to fail
-          setTimeout(()=>{
-            const ok=enc.state==='configured';
-            if(ok) enc.close();
-            res(ok);
-          },200);
-        }catch(e){ res(false); }
-      });
-    };
-
-    const h264Profiles=['avc1.42E01E','avc1.42001E','avc1.4D001E','avc1.64001E','avc1.420028','avc1.42003e'];
-    let videoCodecStr=null;
-    for(const c of h264Profiles){
-      if(await tryVideoCodec(c)){videoCodecStr=c;break;}
-    }
-
-    // Fallback to VP8 in WebM if H.264 not available
-    let useWebM=false;
-    if(!videoCodecStr){
-      if(await tryVideoCodec('vp8')){videoCodecStr='vp8';useWebM=true;}
-      else if(await tryVideoCodec('vp09.00.10.08')){videoCodecStr='vp09.00.10.08';useWebM=true;}
-      else throw new Error('No supported video codec found. Please use Chrome 94+ on desktop.');
-    }
-
-    // Re-create muxer if using WebM
-    let muxerFinal=muxer;
-    let targetFinal=target;
-    if(useWebM){
-      const{Muxer:M2,ArrayBufferTarget:T2}=window.Mp4Muxer;
-      targetFinal=new T2();
-      muxerFinal=new M2({
-        target:targetFinal,
-        video:{codec:'V_VP8',width:vw2,height:vh2,frameRate:fps},
-        audio:{codec:'A_OPUS',sampleRate:audioBuf.sampleRate,numberOfChannels:audioBuf.numberOfChannels},
-        type:'webm',
-      });
-    }
-
-    let videoEncoderError=null;
-    const videoEncoder=new VideoEncoder({
-      output:(chunk,meta)=>muxerFinal.addVideoChunk(chunk,meta),
-      error:e=>{ videoEncoderError=e; }
-    });
-    videoEncoder.configure({
-      codec:videoCodecStr,
-      width:vw2, height:vh2,
-      bitrate:8_000_000,
-      framerate:fps,
-    });
-    await new Promise(r=>setTimeout(r,100));
-    if(videoEncoder.state!=='configured') throw new Error(`VideoEncoder failed for codec ${videoCodecStr}`);
-
-    // ── Set up AudioEncoder ──
-    const audioCodecStr=useWebM?'opus':'mp4a.40.2';
-    let audioEncoderError=null;
-    const audioEncoder=new AudioEncoder({
-      output:(chunk,meta)=>muxerFinal.addAudioChunk(chunk,meta),
-      error:e=>{ audioEncoderError=e; console.error('AudioEncoder error:',e); }
-    });
-    audioEncoder.configure({
-      codec:audioCodecStr,
-      sampleRate:audioBuf.sampleRate,
-      numberOfChannels:audioBuf.numberOfChannels,
-      bitrate:192000,
-    });
-    if(audioEncoder.state!=='configured') throw new Error('AudioEncoder failed to configure.');
-
-    // ── Encode audio first (AudioData from buffer) ──
-    statusEl.textContent='encoding audio...';
-    const samplesPerFrame=1024;
-    const totalSamples=audioBuf.length;
-    const sr=audioBuf.sampleRate;
-    const nc=audioBuf.numberOfChannels;
-
-    // Encode audio chunks as f32-planar AudioData
-    for(let offset=0;offset<totalSamples;offset+=samplesPerFrame){
-      const frameSize=Math.min(samplesPerFrame,totalSamples-offset);
-      // f32-planar: all channel 0 samples, then all channel 1 samples
-      const planar=new Float32Array(frameSize*nc);
-      for(let ch=0;ch<nc;ch++){
-        const chData=audioBuf.getChannelData(ch);
-        planar.set(chData.subarray(offset,offset+frameSize),ch*frameSize);
-      }
-      const audioData=new AudioData({
-        format:'f32-planar',
-        sampleRate:sr,
-        numberOfFrames:frameSize,
-        numberOfChannels:nc,
-        timestamp:Math.round(offset/sr*1_000_000),
-        data:planar,
-      });
-      audioEncoder.encode(audioData);
-      audioData.close();
-    }
-    await audioEncoder.flush();
-
-    // ── Encode video frame by frame (seek + capture) ──
-    statusEl.textContent='encoding video... 0%';
     const canvas=document.createElement('canvas');
-    canvas.width=vw2; canvas.height=vh2;
-    const ctx2d=canvas.getContext('2d');
+    canvas.width=vw; canvas.height=vh;
+    const ctx=canvas.getContext('2d');
 
-    for(let f=0;f<totalFrames;f++){
-      const t=f*frameInterval;
+    // ── 3. AudioContext — stream corrected audio into MediaRecorder ──
+    const actx=new(window.AudioContext||window.webkitAudioContext)();
+    const dest=actx.createMediaStreamDestination();
+    const audioSrc=actx.createBufferSource();
+    audioSrc.buffer=audioBuf;
+    audioSrc.connect(dest);
 
-      // Seek to exact time
-      vid.currentTime=t;
-      await new Promise(res=>{
-        const h=()=>{ vid.removeEventListener('seeked',h); res(); };
-        vid.addEventListener('seeked',h);
-        setTimeout(res,800); // safety fallback
-      });
-      ctx2d.drawImage(vid,0,0,vw2,vh2);
+    // ── 4. Combined stream: canvas video + WebAudio audio ──
+    const combined=new MediaStream([
+      ...canvas.captureStream(30).getVideoTracks(),
+      ...dest.stream.getAudioTracks()
+    ]);
 
-      const frame=new VideoFrame(canvas,{
-        timestamp:Math.round(t*1_000_000),
-        duration:Math.round(frameInterval*1_000_000),
-      });
-      // Keyframe every 2 seconds for smooth seeking in output
-      videoEncoder.encode(frame,{keyFrame:f%60===0});
-      frame.close();
-      if(videoEncoderError) throw videoEncoderError;
+    const mimeType=
+      MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')?'video/webm;codecs=vp9,opus':
+      MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')?'video/webm;codecs=vp8,opus':
+      'video/webm';
 
-      // Backpressure: wait if encoder queue is full
-      while(videoEncoder.encodeQueueSize>10){
-        await new Promise(r=>setTimeout(r,20));
+    const chunks=[];
+    const mr=new MediaRecorder(combined,{mimeType,videoBitsPerSecond:8_000_000});
+    mr.ondataavailable=e=>{ if(e.data&&e.data.size>0) chunks.push(e.data); };
+    const recordingDone=new Promise(r=>mr.onstop=r);
+
+    // ── 5. Seek to start, then start everything simultaneously ──
+    statusEl.textContent='preparing...';
+    vid.currentTime=0;
+    await new Promise(r=>{ vid.onseeked=r; setTimeout(r,1000); });
+
+    // Start MediaRecorder + audio + video at the same moment
+    mr.start(100);
+    const startT=actx.currentTime+0.05;
+    audioSrc.start(startT);
+    setTimeout(()=>vid.play(), 50);
+
+    // ── 6. Draw video frames continuously ──
+    const drawLoop=()=>{
+      ctx.drawImage(vid,0,0,vw,vh);
+      const pct=Math.min(100,Math.round((vid.currentTime/duration)*100));
+      statusEl.textContent=`recording... ${pct}%`;
+      if(!vid.ended && vid.currentTime<duration-0.05){
+        requestAnimationFrame(drawLoop);
       }
+    };
+    requestAnimationFrame(drawLoop);
 
-      // Update progress every 3 frames
-      if(f%3===0){
-        statusEl.textContent=`encoding video... ${Math.round((f/totalFrames)*100)}%`;
-        await new Promise(r=>setTimeout(r,0));
-      }
-    }
+    // ── 7. Wait for video to end ──
+    await new Promise(res=>{
+      vid.onended=res;
+      setTimeout(res,(duration+3)*1000); // safety
+    });
 
-    // Wait for all frames to finish encoding
-    statusEl.textContent='finishing encode...';
-    await videoEncoder.flush();
-    // Give muxer time to process all chunks
-    await new Promise(r=>setTimeout(r,500));
-
-    // ── Finalize ──
-    statusEl.textContent='finalizing...';
-    muxerFinal.finalize();
+    // Final frame + stop
+    ctx.drawImage(vid,0,0,vw,vh);
+    await new Promise(r=>setTimeout(r,300));
+    mr.stop();
+    await recordingDone;
+    actx.close();
     URL.revokeObjectURL(videoURL);
 
-    // ── Download ──
-    const outExt=useWebM?'webm':'mp4';
-    const outMime=useWebM?'video/webm':'video/mp4';
-    const{buffer}=targetFinal;
-    const blob=new Blob([buffer],{type:outMime});
+    // ── 8. Download ──
+    statusEl.textContent='preparing download...';
+    subEl.textContent='';
+    const blob=new Blob(chunks,{type:'video/webm'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
     a.href=url;
     const base=videoSourceFile.name.replace(/\.[^.]+$/,'');
-    a.download=`${base}_pitchcraft.${outExt}`;
+    a.download=`${base}_pitchcraft.webm`;
     a.click();
     setTimeout(()=>URL.revokeObjectURL(url),60000);
 
