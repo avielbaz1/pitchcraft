@@ -2135,7 +2135,7 @@ document.getElementById('export-btn').onclick=()=>{
   const a=document.createElement('a');a.href=url;a.download='pitchcraft_export.wav';a.click();
 };
 
-// ── Video export: re-mux video frames + corrected audio using pure browser APIs ──
+// ── Video export via FFmpeg.wasm v0.11 (no SharedArrayBuffer needed) ──
 document.getElementById('export-video-btn').onclick=async()=>{
   if(!videoSourceFile||!correctedBuffer)return;
   const overlay=document.getElementById('ffmpeg-overlay');
@@ -2145,117 +2145,74 @@ document.getElementById('export-video-btn').onclick=async()=>{
   subEl.textContent='';
 
   try{
-    statusEl.textContent='preparing video source...';
-
-    // ── Step 1: render video frames into an offscreen canvas via HTMLVideoElement
-    const videoURL=URL.createObjectURL(videoSourceFile);
-    const videoEl=document.createElement('video');
-    videoEl.src=videoURL;
-    videoEl.muted=true;
-    videoEl.preload='auto';
-    await new Promise((res,rej)=>{
-      videoEl.onloadedmetadata=res;
-      videoEl.onerror=()=>rej(new Error('Cannot load video for export'));
-    });
-
-    const vw=videoEl.videoWidth||1280;
-    const vh=videoEl.videoHeight||720;
-    const duration=videoEl.duration;
-    const fps=30; // capture at 30fps
-
-    const canvas=document.createElement('canvas');
-    canvas.width=vw; canvas.height=vh;
-    const ctx2d=canvas.getContext('2d');
-
-    // ── Step 2: set up MediaRecorder on canvas stream + corrected audio stream
-    statusEl.textContent='setting up encoder...';
-
-    // Build audio source from corrected buffer
-    const offlineCtx=new OfflineAudioContext(
-      correctedBuffer.numberOfChannels,
-      correctedBuffer.length,
-      correctedBuffer.sampleRate
-    );
-    const srcNode=offlineCtx.createBufferSource();
-    srcNode.buffer=bypassMode?originalBuffer:correctedBuffer;
-    srcNode.connect(offlineCtx.destination);
-    srcNode.start();
-    const renderedBuf=await offlineCtx.startRendering();
-
-    // Create a live AudioContext to stream the corrected audio into MediaRecorder
-    const liveCtx=new AudioContext({sampleRate:renderedBuf.sampleRate});
-    const dest=liveCtx.createMediaStreamDestination();
-
-    // Canvas stream (video)
-    const canvasStream=canvas.captureStream(fps);
-
-    // Combine video track from canvas + audio track from destination
-    const combinedStream=new MediaStream([
-      ...canvasStream.getVideoTracks(),
-      ...dest.stream.getAudioTracks()
-    ]);
-
-    // Pick best supported codec
-    const mimeTypes=[
-      'video/webm;codecs=vp9,opus',
-      'video/webm;codecs=vp8,opus',
-      'video/webm',
-    ];
-    const mimeType=mimeTypes.find(m=>MediaRecorder.isTypeSupported(m))||'video/webm';
-
-    const chunks=[];
-    const mr=new MediaRecorder(combinedStream,{mimeType,videoBitsPerSecond:8000000});
-    mr.ondataavailable=e=>{ if(e.data&&e.data.size>0) chunks.push(e.data); };
-
-    const recordingDone=new Promise(res=>{ mr.onstop=res; });
-    mr.start(100);
-
-    // ── Step 3: start audio playback into the stream destination
-    const audioSrc=liveCtx.createBufferSource();
-    audioSrc.buffer=renderedBuf;
-    audioSrc.connect(dest);
-    audioSrc.start();
-
-    // ── Step 4: scrub video frame by frame and draw to canvas
-    statusEl.textContent='encoding... 0%';
-    const totalFrames=Math.ceil(duration*fps);
-    const frameInterval=1/fps;
-
-    for(let f=0;f<totalFrames;f++){
-      const t=f*frameInterval;
-      videoEl.currentTime=t;
-      await new Promise(res=>{
-        const handler=()=>{ videoEl.removeEventListener('seeked',handler); res(); };
-        videoEl.addEventListener('seeked',handler);
-        // If already at time (can happen), resolve immediately
-        setTimeout(res,200);
+    // ── Load FFmpeg.wasm v0.11 (single-threaded, no SharedArrayBuffer required) ──
+    if(!window._ffmpegReady){
+      statusEl.textContent='loading FFmpeg...';
+      subEl.textContent='first use downloads ~20MB — cached after that';
+      await new Promise((res,rej)=>{
+        const s=document.createElement('script');
+        s.src='https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js';
+        s.onload=res;
+        s.onerror=()=>rej(new Error('Could not load FFmpeg. Check internet connection.'));
+        document.head.appendChild(s);
       });
-      ctx2d.drawImage(videoEl,0,0,vw,vh);
-      statusEl.textContent=`encoding... ${Math.round((f/totalFrames)*100)}%`;
-      // Yield to browser every 10 frames to keep UI responsive
-      if(f%10===0) await new Promise(r=>setTimeout(r,0));
+      window._ffmpegReady=true;
     }
 
-    // ── Step 5: stop and collect
-    statusEl.textContent='finalizing...';
-    // Wait for audio to finish naturally, then stop
-    const audioRemaining=Math.max(0,(duration-(totalFrames*frameInterval)))*1000;
-    await new Promise(r=>setTimeout(r,audioRemaining+200));
-    mr.stop();
-    await recordingDone;
-    liveCtx.close();
-    URL.revokeObjectURL(videoURL);
+    statusEl.textContent='initializing FFmpeg...';
+    subEl.textContent='';
+    const {createFFmpeg,fetchFile}=FFmpeg;
+    const ffmpeg=createFFmpeg({
+      log:false,
+      progress:({ratio})=>{
+        if(ratio>0) statusEl.textContent=`merging... ${Math.round(ratio*100)}%`;
+      }
+    });
+    await ffmpeg.load();
 
-    // ── Step 6: download
+    // ── Write video file ──
+    statusEl.textContent='loading video...';
+    const videoExt=videoSourceFile.name.split('.').pop().toLowerCase();
+    ffmpeg.FS('writeFile',`input.${videoExt}`,await fetchFile(videoSourceFile));
+
+    // ── Write corrected audio as WAV ──
+    statusEl.textContent='loading audio...';
+    const wavBuf=bufToWav(bypassMode?originalBuffer:correctedBuffer);
+    ffmpeg.FS('writeFile','audio.wav',new Uint8Array(wavBuf));
+
+    // ── Merge: copy video stream, replace audio ──
+    statusEl.textContent='merging tracks...';
+    const outExt=['mp4','mov','mkv','webm'].includes(videoExt)?videoExt:'mp4';
+    await ffmpeg.run(
+      '-i',`input.${videoExt}`,
+      '-i','audio.wav',
+      '-c:v','copy',    // keep original video — no re-encode
+      '-c:a','aac',
+      '-b:a','192k',
+      '-map','0:v:0',
+      '-map','1:a:0',
+      '-shortest',
+      '-y',
+      `output.${outExt}`
+    );
+
+    // ── Download result ──
     statusEl.textContent='preparing download...';
-    const blob=new Blob(chunks,{type:mimeType});
+    const data=ffmpeg.FS('readFile',`output.${outExt}`);
+    const mimeMap={mp4:'video/mp4',mov:'video/quicktime',mkv:'video/x-matroska',webm:'video/webm'};
+    const blob=new Blob([data.buffer],{type:mimeMap[outExt]||'video/mp4'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
     a.href=url;
     const baseName=videoSourceFile.name.replace(/\.[^.]+$/,'');
-    a.download=`${baseName}_pitchcraft.webm`;
+    a.download=`${baseName}_pitchcraft.${outExt}`;
     a.click();
     setTimeout(()=>URL.revokeObjectURL(url),60000);
+
+    // Cleanup FS
+    try{ffmpeg.FS('unlink',`input.${videoExt}`);}catch(e){}
+    try{ffmpeg.FS('unlink','audio.wav');}catch(e){}
+    try{ffmpeg.FS('unlink',`output.${outExt}`);}catch(e){}
 
   }catch(err){
     statusEl.textContent='error: '+err.message;
