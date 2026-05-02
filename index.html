@@ -2135,10 +2135,7 @@ document.getElementById('export-btn').onclick=()=>{
   const a=document.createElement('a');a.href=url;a.download='pitchcraft_export.wav';a.click();
 };
 
-// ── Video export — pure JS, no FFmpeg, no SharedArrayBuffer ──
-// Strategy: play video+audio in sync into a canvas+AudioContext,
-// capture via MediaRecorder → WebM output, then offer download.
-// Falls back gracefully on any browser.
+// ── Video export — MP4 via mp4-muxer (pure JS, no WASM, no special headers) ──
 document.getElementById('export-video-btn').onclick=async()=>{
   if(!videoSourceFile||!correctedBuffer)return;
   const overlay=document.getElementById('ffmpeg-overlay');
@@ -2148,13 +2145,28 @@ document.getElementById('export-video-btn').onclick=async()=>{
   subEl.textContent='';
 
   try{
-    statusEl.textContent='preparing...';
+    // ── Load mp4-muxer from CDN (tiny ~50KB, pure JS) ──
+    if(!window.Mp4Muxer){
+      statusEl.textContent='loading MP4 encoder...';
+      subEl.textContent='downloading ~50KB library';
+      await new Promise((res,rej)=>{
+        const s=document.createElement('script');
+        s.src='https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.min.js';
+        s.onload=res;
+        s.onerror=()=>rej(new Error('Could not load mp4-muxer. Check internet connection.'));
+        document.head.appendChild(s);
+      });
+    }
 
-    // ── 1. Decode corrected audio into a fresh AudioContext ──
-    const exportCtx=new(window.AudioContext||window.webkitAudioContext)();
-    const dest=exportCtx.createMediaStreamDestination();
+    // Check WebCodecs support
+    if(!window.VideoEncoder||!window.AudioEncoder){
+      throw new Error('Your browser does not support VideoEncoder/AudioEncoder (WebCodecs). Please use Chrome 94+ or Edge 94+.');
+    }
 
-    // ── 2. Set up video element (muted — audio comes from Web Audio) ──
+    statusEl.textContent='preparing video...';
+    subEl.textContent='';
+
+    // ── Load video metadata ──
     const videoURL=URL.createObjectURL(videoSourceFile);
     const vid=document.createElement('video');
     vid.src=videoURL; vid.muted=true; vid.preload='auto';
@@ -2164,77 +2176,120 @@ document.getElementById('export-video-btn').onclick=async()=>{
     });
     const duration=vid.duration;
     const vw=vid.videoWidth||1280, vh=vid.videoHeight||720;
+    const fps=30;
+    const frameInterval=1/fps;
+    const totalFrames=Math.ceil(duration*fps);
 
-    // ── 3. Canvas to capture video frames ──
+    // ── Set up mp4-muxer ──
+    const{Muxer,ArrayBufferTarget}=window.Mp4Muxer;
+    const target=new ArrayBufferTarget();
+    const muxer=new Muxer({
+      target,
+      video:{codec:'avc',width:vw,height:vh,frameRate:fps},
+      audio:{codec:'aac',sampleRate:correctedBuffer.sampleRate,numberOfChannels:correctedBuffer.numberOfChannels},
+      fastStart:'in-memory',
+    });
+
+    // ── Set up VideoEncoder ──
+    let videoEncoderDone=false;
+    const videoEncoder=new VideoEncoder({
+      output:(chunk,meta)=>muxer.addVideoChunk(chunk,meta),
+      error:e=>{ throw e; }
+    });
+    videoEncoder.configure({
+      codec:'avc1.42001f',  // H.264 Baseline
+      width:vw, height:vh,
+      bitrate:6_000_000,
+      framerate:fps,
+      latencyMode:'quality',
+    });
+
+    // ── Set up AudioEncoder ──
+    const audioBuf=bypassMode?originalBuffer:correctedBuffer;
+    const audioEncoder=new AudioEncoder({
+      output:(chunk,meta)=>muxer.addAudioChunk(chunk,meta),
+      error:e=>{ throw e; }
+    });
+    audioEncoder.configure({
+      codec:'mp4a.40.2',  // AAC-LC
+      sampleRate:audioBuf.sampleRate,
+      numberOfChannels:audioBuf.numberOfChannels,
+      bitrate:192000,
+    });
+
+    // ── Encode audio first (AudioData from buffer) ──
+    statusEl.textContent='encoding audio...';
+    const samplesPerFrame=1024;
+    const totalSamples=audioBuf.length;
+    const sr=audioBuf.sampleRate;
+    const nc=audioBuf.numberOfChannels;
+
+    // Encode audio chunks as f32-planar AudioData
+    for(let offset=0;offset<totalSamples;offset+=samplesPerFrame){
+      const frameSize=Math.min(samplesPerFrame,totalSamples-offset);
+      // f32-planar: all channel 0 samples, then all channel 1 samples
+      const planar=new Float32Array(frameSize*nc);
+      for(let ch=0;ch<nc;ch++){
+        const chData=audioBuf.getChannelData(ch);
+        planar.set(chData.subarray(offset,offset+frameSize),ch*frameSize);
+      }
+      const audioData=new AudioData({
+        format:'f32-planar',
+        sampleRate:sr,
+        numberOfFrames:frameSize,
+        numberOfChannels:nc,
+        timestamp:Math.round(offset/sr*1_000_000),
+        data:planar,
+      });
+      audioEncoder.encode(audioData);
+      audioData.close();
+    }
+    await audioEncoder.flush();
+
+    // ── Encode video frame by frame (seek + capture) ──
+    statusEl.textContent='encoding video... 0%';
     const canvas=document.createElement('canvas');
     canvas.width=vw; canvas.height=vh;
     const ctx2d=canvas.getContext('2d');
 
-    // ── 4. MediaRecorder on canvas+audio stream ──
-    const videoStream=canvas.captureStream(30);
-    const combined=new MediaStream([
-      ...videoStream.getVideoTracks(),
-      ...dest.stream.getAudioTracks()
-    ]);
-    const mimeType=['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']
-      .find(m=>MediaRecorder.isTypeSupported(m))||'video/webm';
-    const chunks=[];
-    const mr=new MediaRecorder(combined,{mimeType,videoBitsPerSecond:6000000});
-    mr.ondataavailable=e=>{ if(e.data&&e.data.size>0) chunks.push(e.data); };
-    const done=new Promise(r=>mr.onstop=r);
-
-    // ── 5. Start recording + audio + video playback in sync ──
-    statusEl.textContent='encoding — please wait...';
-    subEl.textContent='do not close this window';
-    mr.start(100);
-
-    // Schedule corrected audio
-    const audioSrc=exportCtx.createBufferSource();
-    audioSrc.buffer=bypassMode?originalBuffer:correctedBuffer;
-    audioSrc.connect(dest);
-
-    // Play video and audio together
-    vid.currentTime=0;
-    await new Promise(r=>{ vid.onseeked=r; vid.currentTime=0; setTimeout(r,500); });
-
-    const startTime=exportCtx.currentTime+0.1;
-    audioSrc.start(startTime);
-    setTimeout(()=>vid.play(), 100);
-
-    // Draw frames continuously until video ends
-    const drawLoop=()=>{
-      if(vid.ended||vid.paused&&vid.currentTime>=duration-0.1) return;
+    for(let f=0;f<totalFrames;f++){
+      const t=f*frameInterval;
+      vid.currentTime=t;
+      await new Promise(res=>{
+        const h=()=>{ vid.removeEventListener('seeked',h); res(); };
+        vid.addEventListener('seeked',h);
+        setTimeout(res,500); // safety fallback
+      });
       ctx2d.drawImage(vid,0,0,vw,vh);
-      const pct=Math.round((vid.currentTime/duration)*100);
-      statusEl.textContent=`encoding... ${pct}%`;
-      requestAnimationFrame(drawLoop);
-    };
-    requestAnimationFrame(drawLoop);
 
-    // Wait for video to finish
-    await new Promise(res=>{
-      vid.onended=res;
-      // Safety timeout: duration + 5s
-      setTimeout(res,(duration+5)*1000);
-    });
+      const frame=new VideoFrame(canvas,{
+        timestamp:Math.round(t*1_000_000),
+        duration:Math.round(frameInterval*1_000_000),
+      });
+      videoEncoder.encode(frame,{keyFrame:f%60===0});
+      frame.close();
 
-    // Final frame + stop
-    ctx2d.drawImage(vid,0,0,vw,vh);
-    await new Promise(r=>setTimeout(r,300));
-    mr.stop();
-    await done;
-    exportCtx.close();
+      // Update progress every 5 frames
+      if(f%5===0){
+        statusEl.textContent=`encoding video... ${Math.round((f/totalFrames)*100)}%`;
+        await new Promise(r=>setTimeout(r,0)); // yield to UI
+      }
+    }
+    await videoEncoder.flush();
+
+    // ── Finalize ──
+    statusEl.textContent='finalizing MP4...';
+    muxer.finalize();
     URL.revokeObjectURL(videoURL);
 
-    // ── 6. Download ──
-    statusEl.textContent='preparing download...';
-    subEl.textContent='';
-    const blob=new Blob(chunks,{type:mimeType});
+    // ── Download ──
+    const{buffer}=target;
+    const blob=new Blob([buffer],{type:'video/mp4'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
     a.href=url;
     const base=videoSourceFile.name.replace(/\.[^.]+$/,'');
-    a.download=`${base}_pitchcraft.webm`;
+    a.download=`${base}_pitchcraft.mp4`;
     a.click();
     setTimeout(()=>URL.revokeObjectURL(url),60000);
 
