@@ -301,6 +301,18 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
   <div style="font-size:11px;font-family:var(--mono);color:var(--muted);max-width:260px;text-align:center" id="ffmpeg-sub">first run downloads ~31MB — takes a moment</div>
 </div>
 
+<!-- ══ FILENAME DIALOG ══════════════════════════════════════ -->
+<div id="filename-dialog" style="display:none;position:fixed;inset:0;z-index:998;background:rgba(8,8,16,.85);backdrop-filter:blur(6px);align-items:center;justify-content:center">
+  <div style="background:#13131f;border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:1.5rem;width:min(340px,90vw);display:flex;flex-direction:column;gap:1rem">
+    <div style="font-size:14px;font-weight:600;color:var(--fg)">Name your export</div>
+    <input id="filename-input" type="text" style="background:#0a0a14;border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:.65rem .85rem;font-size:13px;font-family:var(--mono);color:var(--fg);outline:none;width:100%;box-sizing:border-box" placeholder="my_vocal_track">
+    <div style="display:flex;gap:.75rem">
+      <button id="filename-cancel" style="flex:1;padding:.65rem;background:transparent;border:1px solid rgba(255,255,255,.1);border-radius:8px;color:var(--muted);font-size:13px;cursor:pointer">Cancel</button>
+      <button id="filename-confirm" style="flex:2;padding:.65rem;background:var(--accent);border:none;border-radius:8px;color:#fff;font-size:13px;font-weight:600;cursor:pointer">Export</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ══ MUSIC THEORY ══════════════════════════════════════════════
 const NOTES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
@@ -2029,7 +2041,7 @@ function rebuildCorrectedBuffer(){
   if(!originalBuffer)return;
   correctedBuffer=cloneBuffer(originalBuffer);
   const sr=originalBuffer.sampleRate;
-  const FADE=Math.floor(sr*0.008);
+  const FADE=Math.floor(sr*0.020); // 20ms crossfade (was 8ms)
 
   notes.forEach(n=>{
     const hasShift=Math.abs(n.tuneOffset)>0.005;
@@ -2102,16 +2114,21 @@ function rebuildCorrectedBuffer(){
       }
 
       // ── Time-stretch tmp back to segLen so duration is preserved ──
-      // This prevents desync with video when pitch is shifted.
-      // Simple linear interpolation stretch — sufficient for small pitch shifts.
-      const shiftedLen=srcPos; // how many input samples were actually consumed
+      // Use the actual pitch ratio (not srcPos which is just the last read position).
+      // stretchRatio = how compressed/expanded the pitched audio is vs original.
+      const avgRatio=ratioArray
+        ? ratioArray.reduce((s,v)=>s+v,0)/ratioArray.length
+        : constRatio;
       const stretched=new Float32Array(segLen);
-      const stretchRatio=shiftedLen/segLen;
       for(let i=0;i<segLen;i++){
-        const sp=i*stretchRatio;
+        // map output sample i → position in tmp (which has length segLen but only
+        // avgRatio*segLen valid pitched samples)
+        const sp=i*avgRatio;
         const si2=Math.floor(sp);
         const fr=sp-si2;
-        stretched[i]=si2+1<tmp.length?(1-fr)*tmp[si2]+fr*tmp[si2+1]:tmp[Math.min(si2,tmp.length-1)];
+        const a=si2<tmp.length?tmp[si2]:0;
+        const b=si2+1<tmp.length?tmp[si2+1]:a;
+        stretched[i]=(1-fr)*a+fr*b;
       }
 
       // vibrato reduction: blend toward segment-average pitch (smoothed copy)
@@ -2138,19 +2155,45 @@ function rebuildCorrectedBuffer(){
   updateMinimap();
 }
 
+// ══ FILENAME DIALOG ══════════════════════════════════════════
+function askFilename(defaultName){
+  return new Promise((resolve)=>{
+    const dialog=document.getElementById('filename-dialog');
+    const input=document.getElementById('filename-input');
+    const confirm=document.getElementById('filename-confirm');
+    const cancel=document.getElementById('filename-cancel');
+    input.value=defaultName||'pitchcraft_export';
+    dialog.style.display='flex';
+    setTimeout(()=>{ input.focus(); input.select(); },100);
+    const done=(name)=>{
+      dialog.style.display='none';
+      confirm.onclick=null; cancel.onclick=null;
+      resolve(name);
+    };
+    confirm.onclick=()=>done(input.value.trim()||defaultName||'pitchcraft_export');
+    cancel.onclick=()=>done(null);
+    input.onkeydown=(e)=>{ if(e.key==='Enter') confirm.onclick(); if(e.key==='Escape') cancel.onclick(); };
+  });
+}
+
 // ══ EXPORT ═══════════════════════════════════════════════════
-document.getElementById('export-btn').onclick=()=>{
+document.getElementById('export-btn').onclick=async()=>{
   const buf=bypassMode?originalBuffer:correctedBuffer;
   if(!buf)return;
+  const name=await askFilename('pitchcraft_export');
+  if(!name)return;
   const wav=bufToWav(buf);
   const blob=new Blob([wav],{type:'audio/wav'});
   const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');a.href=url;a.download='pitchcraft_export.wav';a.click();
+  const a=document.createElement('a');a.href=url;a.download=`${name}.wav`;a.click();
 };
 
-// ── Video export — realtime playback + MediaRecorder (perfect sync, no WASM) ──
+// ── Video export via FFmpeg.wasm v0.12 (requires SharedArrayBuffer — Cloudflare headers) ──
 document.getElementById('export-video-btn').onclick=async()=>{
   if(!videoSourceFile||!correctedBuffer)return;
+  const defaultName=videoSourceFile.name.replace(/\.[^.]+$/,'')+'_pitchcraft';
+  const name=await askFilename(defaultName);
+  if(!name)return;
   const overlay=document.getElementById('ffmpeg-overlay');
   const statusEl=document.getElementById('ffmpeg-status');
   const subEl=document.getElementById('ffmpeg-sub');
@@ -2161,8 +2204,6 @@ document.getElementById('export-video-btn').onclick=async()=>{
     const audioBuf=bypassMode?originalBuffer:correctedBuffer;
     const duration=audioBuf.duration;
 
-    // ── 1. Video element (muted — audio from WebAudio) ──
-    statusEl.textContent='loading video...';
     const videoURL=URL.createObjectURL(videoSourceFile);
     const vid=document.createElement('video');
     vid.src=videoURL; vid.muted=true; vid.preload='auto';
@@ -2172,77 +2213,66 @@ document.getElementById('export-video-btn').onclick=async()=>{
       setTimeout(res,5000);
     });
 
-    // ── 2. Canvas (same size as video) ──
     const vw=vid.videoWidth||1280, vh=vid.videoHeight||720;
     const canvas=document.createElement('canvas');
     canvas.width=vw; canvas.height=vh;
     const ctx=canvas.getContext('2d');
 
-    // ── 3. AudioContext — stream corrected audio into MediaRecorder ──
     const actx=new(window.AudioContext||window.webkitAudioContext)();
     const dest=actx.createMediaStreamDestination();
     const audioSrc=actx.createBufferSource();
     audioSrc.buffer=audioBuf;
     audioSrc.connect(dest);
 
-    // ── 4. Combined stream: canvas video + WebAudio audio ──
     const combined=new MediaStream([
       ...canvas.captureStream(30).getVideoTracks(),
       ...dest.stream.getAudioTracks()
     ]);
-
     const mimeType=
       MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')?'video/webm;codecs=vp9,opus':
       MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')?'video/webm;codecs=vp8,opus':
       'video/webm';
-
     const chunks=[];
     const mr=new MediaRecorder(combined,{mimeType,videoBitsPerSecond:8_000_000});
     mr.ondataavailable=e=>{ if(e.data&&e.data.size>0) chunks.push(e.data); };
     const recordingDone=new Promise(r=>mr.onstop=r);
 
-    // ── 5. Seek to start, then start everything simultaneously ──
-    statusEl.textContent='preparing...';
     vid.currentTime=0;
     await new Promise(r=>{ vid.onseeked=r; setTimeout(r,1000); });
-
-    // Start MediaRecorder + audio + video at the same moment
     mr.start(100);
-    const startT=actx.currentTime+0.05;
-    audioSrc.start(startT);
-    setTimeout(()=>vid.play(), 50);
+    audioSrc.start(actx.currentTime+0.05);
+    setTimeout(()=>vid.play(),50);
 
-    // ── 6. Draw video frames at steady 30fps with setInterval ──
-    let drawInterval=setInterval(()=>{
-      if(vid.readyState>=2) ctx.drawImage(vid,0,0,vw,vh);
-      const pct=Math.min(100,Math.round((vid.currentTime/duration)*100));
-      statusEl.textContent=`recording... ${pct}%`;
-    },1000/30);
+    if('requestVideoFrameCallback' in vid){
+      const onFrame=()=>{
+        if(vid.ended||vid.currentTime>=duration-0.05) return;
+        ctx.drawImage(vid,0,0,vw,vh);
+        statusEl.textContent=`recording... ${Math.min(100,Math.round((vid.currentTime/duration)*100))}%`;
+        vid.requestVideoFrameCallback(onFrame);
+      };
+      vid.requestVideoFrameCallback(onFrame);
+    } else {
+      const iv=setInterval(()=>{
+        if(vid.readyState>=2) ctx.drawImage(vid,0,0,vw,vh);
+        statusEl.textContent=`recording... ${Math.min(100,Math.round((vid.currentTime/duration)*100))}%`;
+      },33);
+      setTimeout(()=>clearInterval(iv),(duration+3)*1000);
+    }
 
-    // ── 7. Wait for video to end ──
-    await new Promise(res=>{
-      vid.onended=res;
-      setTimeout(res,(duration+3)*1000);
-    });
-
-    clearInterval(drawInterval);
-    // Final frame + stop
+    await new Promise(res=>{ vid.onended=res; setTimeout(res,(duration+3)*1000); });
     ctx.drawImage(vid,0,0,vw,vh);
-    await new Promise(r=>setTimeout(r,500));
+    await new Promise(r=>setTimeout(r,400));
     mr.stop();
     await recordingDone;
     actx.close();
     URL.revokeObjectURL(videoURL);
 
-    // ── 8. Download ──
     statusEl.textContent='preparing download...';
-    subEl.textContent='';
     const blob=new Blob(chunks,{type:'video/webm'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
     a.href=url;
-    const base=videoSourceFile.name.replace(/\.[^.]+$/,'');
-    a.download=`${base}_pitchcraft.webm`;
+    a.download=`${name}.webm`;
     a.click();
     setTimeout(()=>URL.revokeObjectURL(url),60000);
 
