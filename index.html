@@ -529,6 +529,8 @@ async function processAudio(){
 }
 
 async function loadAudioFromUrl(urlOrBuffer,name){
+  // Always create a fresh AudioContext — the previous one may be closed/suspended
+  try{ if(audioCtx && audioCtx.state!=='closed') await audioCtx.close(); }catch(_){}
   audioCtx=new(window.AudioContext||window.webkitAudioContext)();
   let ab;
   if(urlOrBuffer instanceof ArrayBuffer){
@@ -2356,10 +2358,19 @@ document.getElementById('export-video-btn').onclick=async()=>{
     // 4 ── Mux ──────────────────────────────────────────────────
     statusEl.textContent='muxing… 0%';
     subEl.textContent='copying video stream — no re-encode';
+    // Re-encode to H.264 + AAC — universally compatible (VP9/WebM from Android needs this)
+    // -g 30 = keyframe every 30 frames (~1s at 30fps) for smooth Android playback
+    // ultrafast preset keeps encoding time reasonable in WASM
     await ff.run(
       '-i', videoVPath,
       '-i', 'audio.wav',
-      '-c:v', 'copy',
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-crf', '23',
+      '-g', '30',
+      '-keyint_min', '30',
+      '-c:a', 'aac',
+      '-b:a', '128k',
       '-map', '0:v:0',
       '-map', '1:a:0',
       '-shortest',
@@ -2380,11 +2391,16 @@ document.getElementById('export-video-btn').onclick=async()=>{
     try{ff.FS('unlink',videoVPath);}catch(_){}
     try{ff.FS('unlink','audio.wav');}catch(_){}
     try{ff.FS('unlink','output.mp4');}catch(_){}
+    // Reset instance so FFmpeg WASM doesn't block the UI after export
+    try{ff.exit();}catch(_){}
+    _ffmpegInstance=null;
 
   }catch(err){
     statusEl.textContent='export failed: '+err.message;
     subEl.textContent='check browser console for details';
     console.error('[PitchCraft FFmpeg export]',err);
+    try{_ffmpegInstance&&_ffmpegInstance.exit();}catch(_){}
+    _ffmpegInstance=null;
     setTimeout(()=>{ overlay.style.display='none'; },5000);
     return;
   }
