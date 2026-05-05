@@ -187,11 +187,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
       Upload video file
     </label>
     <input type="file" id="video-in" accept="video/*" style="display:none">
-    <div id="video-badge" style="display:none;margin-top:.5rem;padding:.45rem .75rem;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.3);border-radius:8px;font-size:11px;font-family:var(--mono);color:var(--accent2);display:flex;align-items:center;gap:.5rem">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="15" height="10" rx="2"/><path d="M17 9l5-3v12l-5-3"/></svg>
-      <span id="video-badge-name">video loaded</span>
-      <button onclick="clearVideo()" style="margin-left:auto;background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:12px;padding:0 2px">✕</button>
-    </div>
+
   </div>
 </div>
 
@@ -291,6 +287,11 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
       <button class="export-btn" id="export-btn">↓ Export</button>
       <button class="export-btn" id="export-video-btn" style="display:none;background:var(--accent2);color:#fff">🎬 Export Video</button>
     </div>
+    <div id="video-badge" style="display:none;margin-top:.4rem;padding:.35rem .65rem;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.3);border-radius:8px;font-size:11px;font-family:var(--mono);color:var(--accent2);align-items:center;gap:.5rem">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="15" height="10" rx="2"/><path d="M17 9l5-3v12l-5-3"/></svg>
+      <span id="video-badge-name">video loaded</span>
+      <button onclick="clearVideo()" style="margin-left:auto;background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:12px;padding:0 2px">✕</button>
+    </div>
   </div>
 </div>
 
@@ -298,6 +299,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
 <div id="ffmpeg-overlay" style="display:none;position:fixed;inset:0;z-index:999;background:rgba(8,8,16,.92);backdrop-filter:blur(6px);align-items:center;justify-content:center;gap:1rem;flex-direction:column">
   <div class="proc-ring" style="border-top-color:var(--accent2)"></div>
   <div style="font-family:var(--mono);font-size:13px;color:var(--accent2)" id="ffmpeg-status">loading FFmpeg...</div>
+  <div style="width:260px;height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden">
+    <div id="ffmpeg-bar" style="height:100%;width:0%;background:var(--accent2);border-radius:2px;transition:width .3s ease"></div>
+  </div>
   <div style="font-size:11px;font-family:var(--mono);color:var(--muted);max-width:260px;text-align:center" id="ffmpeg-sub">first run downloads ~31MB — takes a moment</div>
 </div>
 
@@ -486,6 +490,7 @@ document.getElementById('video-in').onchange=async(e)=>{
   // Show badge on record screen
   const badge=document.getElementById('video-badge');
   badge.style.display='flex';
+  badge.style.alignItems='center';
   document.getElementById('video-badge-name').textContent=videoSourceName;
   showScreen('proc-screen');
   document.getElementById('proc-text').textContent='extracting audio from video...';
@@ -2332,6 +2337,9 @@ document.getElementById('export-video-btn').onclick=async()=>{
     const ff=await getFFmpeg();
 
     // v0.11 progress via setLogger
+    const barEl=document.getElementById('ffmpeg-bar');
+    const setBar=p=>{ if(barEl) barEl.style.width=p+'%'; };
+    setBar(0);
     ff.setLogger(({message})=>{
       const m=message.match(/time=(\d+):(\d+):([\d.]+)/);
       if(m){
@@ -2339,6 +2347,7 @@ document.getElementById('export-video-btn').onclick=async()=>{
         const dur=(bypassMode?originalBuffer:correctedBuffer).duration||1;
         const pct=Math.min(100,Math.round((elapsed/dur)*100));
         statusEl.textContent='muxing… '+pct+'%';
+        setBar(pct);
       }
     });
 
@@ -2364,11 +2373,7 @@ document.getElementById('export-video-btn').onclick=async()=>{
     await ff.run(
       '-i', videoVPath,
       '-i', 'audio.wav',
-      '-c:v', 'libx264',
-      '-preset', 'ultrafast',
-      '-crf', '23',
-      '-g', '30',
-      '-keyint_min', '30',
+      '-c:v', 'copy',      // stream copy — no re-encode, fastest possible
       '-c:a', 'aac',
       '-b:a', '128k',
       '-map', '0:v:0',
@@ -2379,6 +2384,7 @@ document.getElementById('export-video-btn').onclick=async()=>{
     );
 
     // 5 ── Read & download ──────────────────────────────────────
+    setBar(100);
     statusEl.textContent='preparing download…';
     const data=ff.FS('readFile','output.mp4');
     const blob=new Blob([data.buffer],{type:'video/mp4'});
