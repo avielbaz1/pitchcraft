@@ -30,11 +30,7 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--sans);height:
 .brand p{font-size:12px;color:var(--muted);margin-top:4px}
 .rec-card{background:var(--s1);border:1px solid var(--border);border-radius:20px;padding:1.25rem;width:100%;max-width:400px}
 .rec-card .lbl{font-size:10px;font-family:var(--mono);letter-spacing:1.2px;color:var(--muted);text-transform:uppercase;margin-bottom:.75rem}
-/* key grid */
-.kg{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:.65rem}
-.kb{font-family:var(--mono);font-size:11px;padding:5px 9px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;transition:all .12s}
-.kb.on{background:var(--accent);border-color:var(--accent);color:#fff}
-select{width:100%;background:var(--s2);border:1px solid var(--border);color:var(--text);font-family:var(--sans);font-size:13px;padding:7px 10px;border-radius:8px;outline:none;margin-bottom:.85rem}
+
 /* big record button */
 .rec-btn-wrap{display:flex;flex-direction:column;align-items:center;gap:.5rem;margin:.75rem 0}
 #big-rec{width:70px;height:70px;border-radius:50%;background:var(--red);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;box-shadow:0 0 0 0 rgba(248,113,113,.4)}
@@ -147,14 +143,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
     <p>vocal pitch editor</p>
   </div>
   <div class="rec-card">
-    <div class="lbl">Key &amp; Scale</div>
-    <div class="kg" id="kg"></div>
-    <select id="sc-sel">
-      <option value="chromatic">Chromatic (all notes)</option>
-      <option value="major">Major</option>
-      <option value="minor">Minor</option>
-    </select>
-
     <div style="margin-bottom:.75rem">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem">
         <span style="font-size:10px;font-family:var(--mono);letter-spacing:1px;color:var(--muted);text-transform:uppercase">sensitivity</span>
@@ -323,14 +311,6 @@ const NOTES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const SCALES={chromatic:[0,1,2,3,4,5,6,7,8,9,10,11],major:[0,2,4,5,7,9,11],minor:[0,2,3,5,7,8,10]};
 let selKey=0,selScale='chromatic';
 
-const kg=document.getElementById('kg');
-NOTES.forEach((k,i)=>{
-  const b=document.createElement('button');
-  b.className='kb'+(i===0?' on':'');b.textContent=k;
-  b.onclick=()=>{selKey=i;document.querySelectorAll('.kb').forEach((x,j)=>x.classList.toggle('on',j===i));};
-  kg.appendChild(b);
-});
-document.getElementById('sc-sel').onchange=e=>selScale=e.target.value;
 
 function f2midi(f){return 12*Math.log2(f/440)+69;}
 function midi2f(m){return 440*Math.pow(2,(m-69)/12);}
