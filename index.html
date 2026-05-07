@@ -323,71 +323,50 @@ function snapMidi(midi){
 }
 function cents(midi){return Math.round((midi-snapMidi(midi))*100);}
 
-// ══ PITCH DETECTION — YIN with CMND ══════════════════════════
-// YIN (de Cheveigné & Kawahara 2002): difference function + CMND
-// + strict voiced gate + parabolic refinement.
-// Cleaner octave behaviour than autocorrelation; no false positives.
+// ══ PITCH DETECTION — Normalized Autocorrelation ════════════
 function detectPitch(buf,sr){
   const n=buf.length;
-
-  // ── Silence gate ─────────────────────────────────────────────
   let rms=0;for(let i=0;i<n;i++)rms+=buf[i]*buf[i];rms=Math.sqrt(rms/n);
-  if(rms<0.003)return{freq:-1,rms};
+  if(rms<0.002)return{freq:-1,rms};
 
-  const minLag=Math.floor(sr/1100); // ~40 samples @44.1k
-  const maxLag=Math.min(Math.ceil(sr/55), Math.floor(n/2)-1); // 55Hz = A1, covers full bass/baritone range
+  // Full vocal range: 55Hz-1100Hz
+  const minP=Math.floor(sr/1100),maxP=Math.ceil(sr/55);
+  let bestR=-1,bestL=-1;
+  for(let lag=minP;lag<=maxP&&lag<n/2;lag++){
+    let num=0,d1=0,d2=0;
+    for(let i=0;i<n-lag;i++){
+      num+=buf[i]*buf[i+lag];
+      d1+=buf[i]*buf[i];
+      d2+=buf[i+lag]*buf[i+lag];
+    }
+    const r=(d1*d2)>0?num/Math.sqrt(d1*d2):0;
+    if(r>bestR){bestR=r;bestL=lag;}
+  }
+  if(bestR<0.4||bestL<1)return{freq:-1,rms};
 
-  // ── Step 1: YIN difference function d[tau] ───────────────────
-  // d[tau] = Σ (x[j] - x[j+tau])^2  over all valid j
-  const d=new Float32Array(maxLag+1);
-  for(let tau=1;tau<=maxLag;tau++){
-    let s=0;
-    const lim=n-tau;
-    for(let j=0;j<lim;j++){const v=buf[j]-buf[j+tau];s+=v*v;}
-    d[tau]=s;
+  // Parabolic refinement
+  if(bestL>minP&&bestL<n/2-1){
+    const r0=getR(buf,n,bestL-1),r1=bestR,r2=getR(buf,n,bestL+1);
+    const d=2*r1-r0-r2;if(d>0)bestL+=0.5*(r0-r2)/d;
   }
 
-  // ── Step 2: Cumulative Mean Normalized Difference (CMND) ─────
-  // d'[tau] = d[tau] * tau / Σ_{j=1}^{tau} d[j]
-  // This is the canonical YIN formula. Voiced minima reliably fall below ~0.1.
-  const cmnd=new Float32Array(maxLag+1);
-  cmnd[0]=1;
-  let runSum=0;
-  for(let tau=1;tau<=maxLag;tau++){
-    runSum+=d[tau];
-    cmnd[tau]=runSum>0?(d[tau]*tau/runSum):1;
-  }
+  let freq=sr/bestL;
 
-  // ── Step 3: Find first local minimum below threshold ─────────
-  // YIN spec: take the FIRST dip below τ (not the global minimum).
-  // This naturally avoids octave errors — octave harmonics have higher cmnd.
-  // Only search within the vocal-range lags.
-  const THRESH=0.15; // standard YIN threshold; 0.10 = strict, 0.20 = permissive
-  let bestLag=-1;
-
-  for(let tau=minLag+1;tau<maxLag-1;tau++){
-    if(cmnd[tau]<THRESH){
-      // Find the bottom of this dip (local minimum)
-      while(tau+1<maxLag && cmnd[tau+1]<cmnd[tau]) tau++;
-      bestLag=tau;
-      break; // first dip = correct period, not a sub-harmonic
+  // Octave correction
+  if(freq>55&&freq<400){
+    const halfLag=Math.round(bestL/2);
+    if(halfLag>=minP&&halfLag<n/2){
+      const rDouble=getR(buf,n,halfLag);
+      if(rDouble>bestR*0.82) freq*=2;
     }
   }
 
-  // No dip found → unvoiced. Do NOT fall back to global min (causes false positives).
-  if(bestLag===-1) return{freq:-1,rms};
-
-  // ── Step 4: Parabolic interpolation ──────────────────────────
-  let refinedLag=bestLag;
-  if(bestLag>1&&bestLag<maxLag){
-    const s0=cmnd[bestLag-1],s1=cmnd[bestLag],s2=cmnd[bestLag+1];
-    const denom=2*s1-s0-s2;
-    if(denom>1e-6) refinedLag=bestLag+0.5*(s0-s2)/denom;
-  }
-
-  const freq=sr/refinedLag;
-  if(freq<55||freq>1100) return{freq:-1,rms}; // 55Hz = A1
-  return{freq,rms};
+  return{freq:(freq>55&&freq<1100)?freq:-1,rms};
+}
+function getR(buf,n,lag){
+  let num=0,d1=0,d2=0;
+  for(let i=0;i<n-lag;i++){num+=buf[i]*buf[i+lag];d1+=buf[i]*buf[i];d2+=buf[i+lag]*buf[i+lag];}
+  return(d1*d2)>0?num/Math.sqrt(d1*d2):0;
 }
 
 // ══ SCREEN MANAGEMENT ════════════════════════════════════════
@@ -594,7 +573,7 @@ function getSensParams(){
     confirmMd:   [0,   4,   3,   2,   2,   1][v], // for medium jumps 1.5-2.5st
     confirmLg:   [0,   2,   2,   1,   1,   1][v], // for large jumps >2.5st
     minMs:       [0, 150, 130, 100,  80,  60][v],
-    gapBridge:   [0,   3,   2,   2,   1,   1][v], // reduced: breath detection priority
+    gapBridge:   [0,   4,   2,   1,   1,   1][v],
   };
 }
 let notes=[];
@@ -634,24 +613,8 @@ function analyzeBuffer(buf){
       samplePos:i, t:i/sr,
       freq:freq>0?freq:0,
       midi:freq>0?f2midi(freq):0,
-      voiced:freq>0&&rms>0.005, rms
+      voiced:freq>0&&rms>0.002, rms
     });
-  }
-
-  // Pass 1b: relative energy gate — mark frames as unvoiced if their RMS drops
-  // significantly below the local peak (catches breaths between notes even when
-  // absolute RMS is above the silence threshold).
-  // Window: ±8 frames (~185ms) to find the local energy peak.
-  // A frame is silenced if its RMS < localPeak * DROP_RATIO.
-  const DROP_RATIO=0.25; // frame must be at least 25% of local peak to stay voiced
-  const ENERGY_HALF=8;
-  for(let i=0;i<frames.length;i++){
-    if(!frames[i].voiced) continue;
-    let localPeak=0;
-    for(let k=Math.max(0,i-ENERGY_HALF);k<=Math.min(frames.length-1,i+ENERGY_HALF);k++){
-      if(frames[k].rms>localPeak) localPeak=frames[k].rms;
-    }
-    if(frames[i].rms < localPeak*DROP_RATIO) frames[i].voiced=false;
   }
 
   // Pass 2: median smooth to suppress vibrato.
@@ -662,7 +625,7 @@ function analyzeBuffer(buf){
   // Note boundaries are protected: if any frame in the window deviates by more than
   // BOUNDARY_GUARD semitones from the current frame, smoothing is skipped — real
   // pitch changes break the condition and leave boundary frames intact.
-  const SMOOTH_HALF=10; // ±10 frames = 21-frame window ≈ 240ms
+  const SMOOTH_HALF=4; // ±4 frames = 9-frame window ≈ 104ms
   const BOUNDARY_GUARD=2.0; // semitones
   for(let i=SMOOTH_HALF;i<frames.length-SMOOTH_HALF;i++){
     if(!frames[i].voiced) continue;
@@ -740,13 +703,6 @@ function analyzeBuffer(buf){
         }
         // Any gap >= gapBridge = end of note
         if(gap>=SP.gapBridge) break;
-        // Short gap — check pitch after gap.
-        // If same semitone: ALWAYS end note (breath between repeated notes).
-        // If different pitch: bridge (legato glide through unvoiced).
-        const afterGap=j+gap;
-        if(afterGap<frames.length && frames[afterGap].voiced){
-          if(Math.round(frames[afterGap].midi)===Math.round(seedMidi)) break;
-        }
         j+=gap-1; continue;
       }
 
@@ -838,86 +794,6 @@ function analyzeBuffer(buf){
   }
 
   // DEBUG: log all segments found after Pass 4
-  // Pass 4b: energy-dip splitter.
-  // For each note segment, scan the RAW audio RMS at HOP intervals.
-  // If a local energy minimum is found that is below DIP_RATIO of the note's
-  // peak energy, split the note there. This catches breaths that pitch-detection
-  // missed because the singer's breath was still voiced.
-  // Only split notes longer than MIN_SPLIT_MS to avoid fragmenting short notes.
-  const MIN_SPLIT_MS=120; // minimum half-note duration after split
-  const DIP_HOP=128;      // fine-grained RMS scan (~3ms per step @44.1k)
-  const MIN_SPLIT_SAMPLES=Math.floor(sr*MIN_SPLIT_MS/1000);
-  let splitDone=true;
-  while(splitDone){
-    splitDone=false;
-    for(let ni=0;ni<notes.length;ni++){
-      const n=notes[ni];
-      const segLen=n.endSample-n.startSample;
-      if(segLen<MIN_SPLIT_SAMPLES*2) continue;
-      // Scan RMS inside the note at fine resolution
-      const rmsArr=[];
-      for(let s=n.startSample;s+DIP_HOP<n.endSample;s+=DIP_HOP){
-        let e=0;
-        for(let k=s;k<s+DIP_HOP;k++) e+=data[k]*data[k];
-        rmsArr.push({s, rms:Math.sqrt(e/DIP_HOP)});
-      }
-      if(rmsArr.length<8) continue;
-      // Use MEDIAN as reference — robust to loud attacks and fades.
-      // A breath dip is typically well below the median even in soft singing.
-      const sorted=[...rmsArr].sort((a,b)=>a.rms-b.rms);
-      const medianRms=sorted[Math.floor(sorted.length/2)].rms;
-      // Also compute local thresholds: for each candidate dip, compare to
-      // the average of its two flanking peaks (±30 frames) rather than global median.
-      // This handles notes where volume decreases naturally (e.g. diminuendo).
-      const margin=Math.floor(rmsArr.length*0.15); // skip first/last 15%
-      // Strategy: find the single deepest valley between two flanking peaks.
-      // We don't use a ratio threshold — instead we require:
-      // 1. The valley must be a true local minimum (lower than neighbors)
-      // 2. There must be a clear peak on BOTH sides (prominence check)
-      // 3. The valley width must be >= 25ms (filters out vibrato)
-      // 4. The valley depth must be >= 15% drop from each flanking peak
-      //    (very lenient — catches even soft bass breaths)
-      const DIP_MIN_FRAMES=Math.ceil(0.025*sr/DIP_HOP); // ~25ms min breath width
-      const MIN_PROMINENCE=0.15; // valley must drop at least 15% from each side
-      let dipIdx=-1, dipScore=-Infinity;
-      for(let k=margin+1;k<rmsArr.length-margin-1;k++){
-        // Must be a local minimum (lower than immediate neighbors)
-        if(rmsArr[k].rms>=rmsArr[k-1].rms||rmsArr[k].rms>=rmsArr[k+1].rms) continue;
-        // Find flanking peaks (within ±40 frames)
-        let leftPeak=0;
-        for(let l=Math.max(margin,k-40);l<k;l++) if(rmsArr[l].rms>leftPeak) leftPeak=rmsArr[l].rms;
-        let rightPeak=0;
-        for(let l=k+1;l<=Math.min(rmsArr.length-margin-1,k+40);l++) if(rmsArr[l].rms>rightPeak) rightPeak=rmsArr[l].rms;
-        if(leftPeak===0||rightPeak===0) continue;
-        // Prominence: how much does the valley drop from each side?
-        const leftDrop=(leftPeak-rmsArr[k].rms)/leftPeak;
-        const rightDrop=(rightPeak-rmsArr[k].rms)/rightPeak;
-        if(rightDrop<MIN_PROMINENCE) continue; // only require peak AFTER the breath
-        // Width check: count frames below midpoint between valley and min(flanking peaks)
-        const midLevel=rmsArr[k].rms+(Math.min(leftPeak,rightPeak)-rmsArr[k].rms)*0.5;
-        let dipWidth=0;
-        for(let w=k;w<Math.min(rmsArr.length,k+DIP_MIN_FRAMES*4);w++){
-          if(rmsArr[w].rms<midLevel) dipWidth++; else break;
-        }
-        if(dipWidth<DIP_MIN_FRAMES) continue;
-        // Score: combination of depth and symmetry
-        const score=(leftDrop+rightDrop)*Math.min(leftPeak,rightPeak);
-        if(score>dipScore){ dipScore=score; dipIdx=k; }
-      }
-      if(dipIdx===-1) continue;
-      const splitSample=rmsArr[dipIdx].s;
-      const splitTime=splitSample/sr;
-      if(splitTime-n.startTime < MIN_SPLIT_MS/1000) continue;
-      if(n.endTime-splitTime < MIN_SPLIT_MS/1000) continue;
-      const first={...n, endSample:splitSample, endTime:splitTime};
-      const second={...n, startSample:splitSample, startTime:splitTime,
-        originalStartSample:splitSample};
-      notes.splice(ni,1,first,second);
-      splitDone=true;
-      break;
-    }
-  }
-
   // Pass 5: merge blobs of same note (fragments of ONE note only — not adjacent scale notes)
   // Stricter than before: only merge if the two fragments clearly belong to the same pitch.
   // Two fragments on adjacent semitones (e.g. E3 + F3) must NOT merge.
