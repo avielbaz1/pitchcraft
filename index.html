@@ -637,16 +637,45 @@ function analyzeBuffer(buf){
       voiced:freq>0&&rms>0.003, rms    });
   }
 
-  // Pass 2: median smooth over 9 frames to kill vibrato/noise
-  for(let i=4;i<frames.length-4;i++){
+  // Pass 2: median smooth to suppress vibrato.
+  // Vibrato is typically 5–6 Hz → period ~170–200ms.
+  // At HOP=512 @44.1kHz one frame ≈ 11.6ms → need ~15 frames to cover one full cycle.
+  // A 21-frame window (±10, ~240ms) ensures the median always spans at least one full
+  // vibrato oscillation and settles on the stable center pitch.
+  // Note boundaries are protected: if any frame in the window deviates by more than
+  // BOUNDARY_GUARD semitones from the current frame, smoothing is skipped — real
+  // pitch changes break the condition and leave boundary frames intact.
+  const SMOOTH_HALF=10; // ±10 frames = 21-frame window ≈ 240ms
+  const BOUNDARY_GUARD=2.0; // semitones
+  for(let i=SMOOTH_HALF;i<frames.length-SMOOTH_HALF;i++){
     if(!frames[i].voiced) continue;
     const vals=[];
-    for(let k=i-4;k<=i+4;k++) if(frames[k].voiced) vals.push(frames[k].midi);
-    if(vals.length>=3){
-      vals.sort((a,b)=>a-b);
-      frames[i].midi=vals[Math.floor(vals.length/2)];
-      frames[i].freq=midi2f(frames[i].midi);
+    let tooFar=false;
+    for(let k=i-SMOOTH_HALF;k<=i+SMOOTH_HALF;k++){
+      if(!frames[k].voiced) continue;
+      if(Math.abs(frames[k].midi-frames[i].midi)>BOUNDARY_GUARD){tooFar=true;break;}
+      vals.push(frames[k].midi);
     }
+    if(tooFar||vals.length<5) continue;
+    vals.sort((a,b)=>a-b);
+    frames[i].midi=vals[Math.floor(vals.length/2)];
+    frames[i].freq=midi2f(frames[i].midi);
+  }
+
+  // Pass 2b: octave outlier removal.
+  // A frame whose pitch is 7+ semitones from BOTH its nearest voiced neighbours
+  // is almost certainly an octave detection error. Mark it unvoiced so it cannot
+  // seed a spurious segment. OCT_LOOK=3 frames (~35ms) avoids killing rapid legato jumps.
+  const OCT_GUARD=7.0;
+  const OCT_LOOK=3;
+  for(let i=OCT_LOOK;i<frames.length-OCT_LOOK;i++){
+    if(!frames[i].voiced) continue;
+    let leftMidi=null,rightMidi=null;
+    for(let k=i-1;k>=Math.max(0,i-OCT_LOOK);k--){if(frames[k].voiced){leftMidi=frames[k].midi;break;}}
+    for(let k=i+1;k<=Math.min(frames.length-1,i+OCT_LOOK);k++){if(frames[k].voiced){rightMidi=frames[k].midi;break;}}
+    const leftFar =leftMidi ===null||Math.abs(frames[i].midi-leftMidi) >=OCT_GUARD;
+    const rightFar=rightMidi===null||Math.abs(frames[i].midi-rightMidi)>=OCT_GUARD;
+    if(leftFar&&rightFar) frames[i].voiced=false;
   }
 
   // Pass 3: snap each frame to nearest semitone
@@ -808,6 +837,43 @@ function analyzeBuffer(buf){
       }
       merged.push(cur);
       notes=merged;
+    }
+  }
+
+  // Pass 6: octave continuity — fix whole-segment octave errors.
+  // If a note is 11–13 semitones away from BOTH its prev and next neighbours,
+  // and the neighbours are close to each other (≤4st apart), it is almost certainly
+  // an octave-detection error for the whole segment. Shift it by ±12 to match context.
+  // Only correct if the shifted version is closer to neighbours than the original.
+  // Run twice to catch chains.
+  for(let pass=0;pass<2;pass++){
+    for(let n=0;n<notes.length;n++){
+      const prev=n>0?notes[n-1]:null;
+      const next=n<notes.length-1?notes[n+1]:null;
+      if(!prev&&!next) continue;
+      const midi=notes[n].midi;
+      // build a "context center" from available neighbours
+      const ctxMidis=[];
+      if(prev) ctxMidis.push(prev.midi);
+      if(next) ctxMidis.push(next.midi);
+      const ctx=ctxMidis.reduce((s,v)=>s+v,0)/ctxMidis.length;
+      const dist=Math.abs(midi-ctx);
+      // Only act on near-octave jumps (9–15st) — catches both 8va and 8vb errors
+      if(dist>=9&&dist<=15){
+        const downDist=Math.abs((midi-12)-ctx);
+        const upDist  =Math.abs((midi+12)-ctx);
+        if(downDist<dist&&downDist<upDist){
+          // shift down one octave
+          notes[n].midi    -=12; notes[n].midiOrig-=12;
+          notes[n].freq     =midi2f(notes[n].midi);
+          notes[n].cents    =Math.round((notes[n].midi-snapMidi(notes[n].midi))*100);
+        } else if(upDist<dist){
+          // shift up one octave
+          notes[n].midi    +=12; notes[n].midiOrig+=12;
+          notes[n].freq     =midi2f(notes[n].midi);
+          notes[n].cents    =Math.round((notes[n].midi-snapMidi(notes[n].midi))*100);
+        }
+      }
     }
   }
 }
