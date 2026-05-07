@@ -573,7 +573,7 @@ function getSensParams(){
     confirmMd:   [0,   4,   3,   2,   2,   1][v], // for medium jumps 1.5-2.5st
     confirmLg:   [0,   2,   2,   1,   1,   1][v], // for large jumps >2.5st
     minMs:       [0, 150, 130, 100,  80,  60][v],
-    gapBridge:   [0,   4,   2,   1,   1,   1][v],
+    gapBridge:   [0,   6,   5,   4,   3,   2][v],
   };
 }
 let notes=[];
@@ -703,6 +703,9 @@ function analyzeBuffer(buf){
         }
         // Any gap >= gapBridge = end of note
         if(gap>=SP.gapBridge) break;
+        // Single-frame gap: check if pitch after gap is same semitone.
+        // If yes — this is a breath between repeated notes, split here.
+        // If no — bridge it (legato transition between different notes).
         j+=gap-1; continue;
       }
 
@@ -1547,6 +1550,25 @@ edCanvas.addEventListener('click',(e)=>{
 function handleTap(x,y,isDouble,shiftKey){
   const hit=hitTest(x,y);
   if(hit){
+    if(isDouble&&!shiftKey){
+      // double-tap on note = split at tap position
+      const splitTime=xToTime(x);
+      const minDur=0.08; // minimum 80ms per half
+      if(splitTime>hit.startTime+minDur && splitTime<hit.endTime-minDur){
+        saveUndo();
+        const splitSample=Math.round(splitTime*originalBuffer.sampleRate);
+        const first={...hit, endSample:splitSample, endTime:splitTime};
+        const second={...hit, startSample:splitSample, startTime:splitTime,
+          originalStartSample:splitSample, selected:false};
+        first.selected=true;
+        const idx=notes.indexOf(hit);
+        notes.splice(idx,1,first,second);
+        selectedNote=first;
+        refreshSelectionPanel();
+        drawEditor();
+        return;
+      }
+    }
     if(shiftKey){
       // shift+tap: toggle this note in/out of selection (keep others)
       hit.selected=!hit.selected;
