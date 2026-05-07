@@ -838,22 +838,14 @@ function analyzeBuffer(buf){
   }
 
   // DEBUG: log all segments found after Pass 4
-  console.log('[segments after Pass4]', notes.map(n=>({
-    note:midiName(Math.round(n.midi)),
-    start:n.startTime.toFixed(2),
-    end:n.endTime.toFixed(2),
-    dur:((n.endTime-n.startTime)*1000).toFixed(0)+'ms'
-  })));
-
   // Pass 4b: energy-dip splitter.
   // For each note segment, scan the RAW audio RMS at HOP intervals.
   // If a local energy minimum is found that is below DIP_RATIO of the note's
   // peak energy, split the note there. This catches breaths that pitch-detection
   // missed because the singer's breath was still voiced.
   // Only split notes longer than MIN_SPLIT_MS to avoid fragmenting short notes.
-  const MIN_SPLIT_MS=180; // don't try to split notes shorter than this
-  const DIP_RATIO=0.35;   // dip must be below 35% of note peak to trigger split
-  const DIP_HOP=256;      // analysis hop for RMS scan (finer than pitch HOP)
+  const MIN_SPLIT_MS=120; // minimum half-note duration after split
+  const DIP_HOP=128;      // fine-grained RMS scan (~3ms per step @44.1k)
   const MIN_SPLIT_SAMPLES=Math.floor(sr*MIN_SPLIT_MS/1000);
   let splitDone=true;
   while(splitDone){
@@ -861,32 +853,52 @@ function analyzeBuffer(buf){
     for(let ni=0;ni<notes.length;ni++){
       const n=notes[ni];
       const segLen=n.endSample-n.startSample;
-      if(segLen<MIN_SPLIT_SAMPLES*2) continue; // too short to split
-      // Scan RMS inside the note
+      if(segLen<MIN_SPLIT_SAMPLES*2) continue;
+      // Scan RMS inside the note at fine resolution
       const rmsArr=[];
       for(let s=n.startSample;s+DIP_HOP<n.endSample;s+=DIP_HOP){
         let e=0;
         for(let k=s;k<s+DIP_HOP;k++) e+=data[k]*data[k];
         rmsArr.push({s, rms:Math.sqrt(e/DIP_HOP)});
       }
-      if(rmsArr.length<6) continue;
-      // Find peak RMS
-      const peak=Math.max(...rmsArr.map(r=>r.rms));
-      const threshold=peak*DIP_RATIO;
-      // Find deepest local minimum in the MIDDLE 60% of the note (avoid edges)
-      const margin=Math.floor(rmsArr.length*0.2);
-      let dipIdx=-1, dipVal=Infinity;
+      if(rmsArr.length<8) continue;
+      // Use MEDIAN as reference — robust to loud attacks and fades.
+      // A breath dip is typically well below the median even in soft singing.
+      const sorted=[...rmsArr].sort((a,b)=>a.rms-b.rms);
+      const medianRms=sorted[Math.floor(sorted.length/2)].rms;
+      // Also compute local thresholds: for each candidate dip, compare to
+      // the average of its two flanking peaks (±30 frames) rather than global median.
+      // This handles notes where volume decreases naturally (e.g. diminuendo).
+      const margin=Math.floor(rmsArr.length*0.15); // skip first/last 15%
+      let dipIdx=-1, dipScore=-Infinity;
       for(let k=margin;k<rmsArr.length-margin;k++){
-        if(rmsArr[k].rms<threshold && rmsArr[k].rms<dipVal){
-          dipVal=rmsArr[k].rms; dipIdx=k;
+        // Find local peak on left side (within 30 frames)
+        let leftPeak=0;
+        for(let l=Math.max(0,k-30);l<k;l++) if(rmsArr[l].rms>leftPeak) leftPeak=rmsArr[l].rms;
+        // Find local peak on right side
+        let rightPeak=0;
+        for(let l=k+1;l<Math.min(rmsArr.length,k+30);l++) if(rmsArr[l].rms>rightPeak) rightPeak=rmsArr[l].rms;
+        if(leftPeak===0||rightPeak===0) continue;
+        const localRef=Math.min(leftPeak,rightPeak); // conservative: use the quieter side
+        const dipRatio=rmsArr[k].rms/localRef;
+        // Score = how deep the dip is relative to local context
+        // Only consider dips below 60% of the local reference (breath threshold)
+        if(dipRatio<0.75){
+          // Require the dip to span at least 35ms (vibrato dips are <20ms)
+          // Count consecutive frames below threshold around this point
+          const DIP_MIN_FRAMES=Math.ceil(0.035*sr/DIP_HOP); // ~35ms
+          let dipWidth=0;
+          for(let w=k;w<Math.min(rmsArr.length,k+DIP_MIN_FRAMES*3);w++){
+            if(rmsArr[w].rms/localRef<0.75) dipWidth++; else break;
+          }
+          if(dipWidth<DIP_MIN_FRAMES) continue; // too narrow — vibrato, not breath
+          const score=localRef-rmsArr[k].rms;
+          if(score>dipScore){ dipScore=score; dipIdx=k; }
         }
       }
-      console.log('[dip scan]', midiName(Math.round(n.midi)), 'dur:'+(segLen/sr*1000).toFixed(0)+'ms', 'peak:'+peak.toFixed(4), 'thresh:'+threshold.toFixed(4), 'dipIdx:'+dipIdx, dipIdx>=0?'dipVal:'+dipVal.toFixed(4):'');
       if(dipIdx===-1) continue;
-      // Split the note at the dip
       const splitSample=rmsArr[dipIdx].s;
       const splitTime=splitSample/sr;
-      // Minimum duration for each half
       if(splitTime-n.startTime < MIN_SPLIT_MS/1000) continue;
       if(n.endTime-splitTime < MIN_SPLIT_MS/1000) continue;
       const first={...n, endSample:splitSample, endTime:splitTime};
@@ -894,7 +906,7 @@ function analyzeBuffer(buf){
         originalStartSample:splitSample};
       notes.splice(ni,1,first,second);
       splitDone=true;
-      break; // restart loop after any split
+      break;
     }
   }
 
