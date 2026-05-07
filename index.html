@@ -870,31 +870,39 @@ function analyzeBuffer(buf){
       // the average of its two flanking peaks (±30 frames) rather than global median.
       // This handles notes where volume decreases naturally (e.g. diminuendo).
       const margin=Math.floor(rmsArr.length*0.15); // skip first/last 15%
+      // Strategy: find the single deepest valley between two flanking peaks.
+      // We don't use a ratio threshold — instead we require:
+      // 1. The valley must be a true local minimum (lower than neighbors)
+      // 2. There must be a clear peak on BOTH sides (prominence check)
+      // 3. The valley width must be >= 25ms (filters out vibrato)
+      // 4. The valley depth must be >= 15% drop from each flanking peak
+      //    (very lenient — catches even soft bass breaths)
+      const DIP_MIN_FRAMES=Math.ceil(0.025*sr/DIP_HOP); // ~25ms min breath width
+      const MIN_PROMINENCE=0.15; // valley must drop at least 15% from each side
       let dipIdx=-1, dipScore=-Infinity;
-      for(let k=margin;k<rmsArr.length-margin;k++){
-        // Find local peak on left side (within 30 frames)
+      for(let k=margin+1;k<rmsArr.length-margin-1;k++){
+        // Must be a local minimum (lower than immediate neighbors)
+        if(rmsArr[k].rms>=rmsArr[k-1].rms||rmsArr[k].rms>=rmsArr[k+1].rms) continue;
+        // Find flanking peaks (within ±40 frames)
         let leftPeak=0;
-        for(let l=Math.max(0,k-30);l<k;l++) if(rmsArr[l].rms>leftPeak) leftPeak=rmsArr[l].rms;
-        // Find local peak on right side
+        for(let l=Math.max(margin,k-40);l<k;l++) if(rmsArr[l].rms>leftPeak) leftPeak=rmsArr[l].rms;
         let rightPeak=0;
-        for(let l=k+1;l<Math.min(rmsArr.length,k+30);l++) if(rmsArr[l].rms>rightPeak) rightPeak=rmsArr[l].rms;
+        for(let l=k+1;l<=Math.min(rmsArr.length-margin-1,k+40);l++) if(rmsArr[l].rms>rightPeak) rightPeak=rmsArr[l].rms;
         if(leftPeak===0||rightPeak===0) continue;
-        const localRef=Math.min(leftPeak,rightPeak); // conservative: use the quieter side
-        const dipRatio=rmsArr[k].rms/localRef;
-        // Score = how deep the dip is relative to local context
-        // Only consider dips below 60% of the local reference (breath threshold)
-        if(dipRatio<0.75){
-          // Require the dip to span at least 35ms (vibrato dips are <20ms)
-          // Count consecutive frames below threshold around this point
-          const DIP_MIN_FRAMES=Math.ceil(0.035*sr/DIP_HOP); // ~35ms
-          let dipWidth=0;
-          for(let w=k;w<Math.min(rmsArr.length,k+DIP_MIN_FRAMES*3);w++){
-            if(rmsArr[w].rms/localRef<0.75) dipWidth++; else break;
-          }
-          if(dipWidth<DIP_MIN_FRAMES) continue; // too narrow — vibrato, not breath
-          const score=localRef-rmsArr[k].rms;
-          if(score>dipScore){ dipScore=score; dipIdx=k; }
+        // Prominence: how much does the valley drop from each side?
+        const leftDrop=(leftPeak-rmsArr[k].rms)/leftPeak;
+        const rightDrop=(rightPeak-rmsArr[k].rms)/rightPeak;
+        if(rightDrop<MIN_PROMINENCE) continue; // only require peak AFTER the breath
+        // Width check: count frames below midpoint between valley and min(flanking peaks)
+        const midLevel=rmsArr[k].rms+(Math.min(leftPeak,rightPeak)-rmsArr[k].rms)*0.5;
+        let dipWidth=0;
+        for(let w=k;w<Math.min(rmsArr.length,k+DIP_MIN_FRAMES*4);w++){
+          if(rmsArr[w].rms<midLevel) dipWidth++; else break;
         }
+        if(dipWidth<DIP_MIN_FRAMES) continue;
+        // Score: combination of depth and symmetry
+        const score=(leftDrop+rightDrop)*Math.min(leftPeak,rightPeak);
+        if(score>dipScore){ dipScore=score; dipIdx=k; }
       }
       if(dipIdx===-1) continue;
       const splitSample=rmsArr[dipIdx].s;
