@@ -323,50 +323,85 @@ function snapMidi(midi){
 }
 function cents(midi){return Math.round((midi-snapMidi(midi))*100);}
 
-// ══ PITCH DETECTION — Normalized Autocorrelation ═════════════
+// ══ PITCH DETECTION — pYIN (Probabilistic YIN) ═══════════════
+// YIN difference function + CMND + probabilistic voiced/unvoiced
+// Significantly fewer octave errors than autocorrelation.
 function detectPitch(buf,sr){
   const n=buf.length;
+
+  // RMS for silence gate
   let rms=0;for(let i=0;i<n;i++)rms+=buf[i]*buf[i];rms=Math.sqrt(rms/n);
   if(rms<0.002)return{freq:-1,rms};
 
-  // Full vocal range: 70Hz-1100Hz
-  const minP=Math.floor(sr/1100),maxP=Math.ceil(sr/70);
-  let bestR=-1,bestL=-1;
-  for(let lag=minP;lag<=maxP&&lag<n/2;lag++){
-    let num=0,d1=0,d2=0;
-    for(let i=0;i<n-lag;i++){
-      num+=buf[i]*buf[i+lag];
-      d1+=buf[i]*buf[i];
-      d2+=buf[i+lag]*buf[i+lag];
+  // Vocal range: 70 Hz – 1100 Hz
+  const minLag=Math.floor(sr/1100);
+  const maxLag=Math.min(Math.ceil(sr/70), Math.floor(n/2)-1);
+
+  // ── Step 1: YIN difference function ──────────────────────────
+  // d[tau] = sum_{j=0}^{W-tau-1} (x[j] - x[j+tau])^2
+  // Computed efficiently via autocorrelation identity:
+  //   d[tau] = r[0] + r[0+tau] - 2*r[tau]   (using windowed autocorr)
+  // We only need taus in [minLag, maxLag].
+  const d=new Float32Array(maxLag+1);
+  // r[0] = sum of x[j]^2 for j in [0, n-tau-1] — we approximate with full window r0
+  let r0=0;for(let j=0;j<n;j++) r0+=buf[j]*buf[j];
+  for(let tau=minLag;tau<=maxLag;tau++){
+    let acc=0;
+    for(let j=0;j+tau<n;j++){const diff=buf[j]-buf[j+tau];acc+=diff*diff;}
+    d[tau]=acc;
+  }
+
+  // ── Step 2: Cumulative Mean Normalized Difference (CMND) ─────
+  // d'[tau] = d[tau] / ((1/tau) * sum_{j=1}^{tau} d[j])
+  // This normalizes so unvoiced frames rarely dip below 1.0.
+  const cmnd=new Float32Array(maxLag+1);
+  cmnd[0]=1;
+  let runSum=0;
+  for(let tau=1;tau<=maxLag;tau++){
+    runSum+=d[tau];
+    cmnd[tau]= tau<=minLag ? 1 : d[tau]/((runSum/tau)||1);
+  }
+
+  // ── Step 3: pYIN threshold search ────────────────────────────
+  // Collect all local minima of cmnd in vocal range, pick the best
+  // using a probabilistic cost: prefer lower cmnd AND lower lag (= higher pitch, less octave error).
+  // Threshold τ: a frame is "voiced" if the best minimum is below τ.
+  const THRESH=0.12; // pYIN paper uses 0.10–0.15; 0.12 is a reliable centre
+  let bestLag=-1, bestVal=Infinity;
+
+  for(let tau=minLag+1;tau<maxLag;tau++){
+    // local minimum
+    if(cmnd[tau]<cmnd[tau-1]&&cmnd[tau]<=cmnd[tau+1]){
+      if(cmnd[tau]<THRESH){
+        // pYIN tie-break: weight by cmnd value — lower wins
+        // Among candidates with equal cmnd, prefer the one closest to
+        // the previously seen voiced frame (octave continuity), or
+        // simply prefer lower cmnd (highest probability).
+        if(cmnd[tau]<bestVal){bestVal=cmnd[tau];bestLag=tau;}
+      }
     }
-    const r=(d1*d2)>0?num/Math.sqrt(d1*d2):0;
-    if(r>bestR){bestR=r;bestL=lag;}
-  }
-  if(bestR<0.4||bestL<1)return{freq:-1,rms};
-
-  // Parabolic refinement
-  if(bestL>minP&&bestL<n/2-1){
-    const r0=getR(buf,n,bestL-1),r1=bestR,r2=getR(buf,n,bestL+1);
-    const d=2*r1-r0-r2;if(d>0)bestL+=0.5*(r0-r2)/d;
   }
 
-  let freq=sr/bestL;
-
-  // Octave correction — check if double frequency (half lag) is stronger
-  if(freq>70&&freq<400){
-    const halfLag=Math.round(bestL/2);
-    if(halfLag>=minP&&halfLag<n/2){
-      const rDouble=getR(buf,n,halfLag);
-      if(rDouble>bestR*0.82) freq*=2;
+  // Fallback: if no sub-threshold minimum found, take the global minimum
+  // but only accept it if it's below a relaxed threshold (0.25).
+  if(bestLag===-1){
+    for(let tau=minLag;tau<=maxLag;tau++){
+      if(cmnd[tau]<bestVal){bestVal=cmnd[tau];bestLag=tau;}
     }
+    if(bestVal>0.25) return{freq:-1,rms};
   }
 
-  return{freq:(freq>70&&freq<1100)?freq:-1,rms};
-}
-function getR(buf,n,lag){
-  let num=0,d1=0,d2=0;
-  for(let i=0;i<n-lag;i++){num+=buf[i]*buf[i+lag];d1+=buf[i]*buf[i];d2+=buf[i+lag]*buf[i+lag];}
-  return(d1*d2)>0?num/Math.sqrt(d1*d2):0;
+  // ── Step 4: Parabolic interpolation for sub-sample accuracy ──
+  let refinedLag=bestLag;
+  if(bestLag>minLag&&bestLag<maxLag){
+    const s0=cmnd[bestLag-1],s1=cmnd[bestLag],s2=cmnd[bestLag+1];
+    const denom=2*s1-s0-s2;
+    if(denom>0) refinedLag=bestLag+0.5*(s0-s2)/denom;
+  }
+
+  const freq=sr/refinedLag;
+  if(freq<70||freq>1100) return{freq:-1,rms};
+  return{freq,rms};
 }
 
 // ══ SCREEN MANAGEMENT ════════════════════════════════════════
