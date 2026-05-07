@@ -335,7 +335,7 @@ function detectPitch(buf,sr){
   if(rms<0.003)return{freq:-1,rms};
 
   const minLag=Math.floor(sr/1100); // ~40 samples @44.1k
-  const maxLag=Math.min(Math.ceil(sr/70), Math.floor(n/2)-1);
+  const maxLag=Math.min(Math.ceil(sr/55), Math.floor(n/2)-1); // 55Hz = A1, covers full bass/baritone range
 
   // ── Step 1: YIN difference function d[tau] ───────────────────
   // d[tau] = Σ (x[j] - x[j+tau])^2  over all valid j
@@ -386,7 +386,7 @@ function detectPitch(buf,sr){
   }
 
   const freq=sr/refinedLag;
-  if(freq<70||freq>1100) return{freq:-1,rms};
+  if(freq<55||freq>1100) return{freq:-1,rms}; // 55Hz = A1
   return{freq,rms};
 }
 
@@ -594,7 +594,7 @@ function getSensParams(){
     confirmMd:   [0,   4,   3,   2,   2,   1][v], // for medium jumps 1.5-2.5st
     confirmLg:   [0,   2,   2,   1,   1,   1][v], // for large jumps >2.5st
     minMs:       [0, 150, 130, 100,  80,  60][v],
-    gapBridge:   [0,   6,   5,   4,   3,   2][v],
+    gapBridge:   [0,   3,   2,   2,   1,   1][v], // reduced: breath detection priority
   };
 }
 let notes=[];
@@ -634,7 +634,24 @@ function analyzeBuffer(buf){
       samplePos:i, t:i/sr,
       freq:freq>0?freq:0,
       midi:freq>0?f2midi(freq):0,
-      voiced:freq>0&&rms>0.003, rms    });
+      voiced:freq>0&&rms>0.005, rms
+    });
+  }
+
+  // Pass 1b: relative energy gate — mark frames as unvoiced if their RMS drops
+  // significantly below the local peak (catches breaths between notes even when
+  // absolute RMS is above the silence threshold).
+  // Window: ±8 frames (~185ms) to find the local energy peak.
+  // A frame is silenced if its RMS < localPeak * DROP_RATIO.
+  const DROP_RATIO=0.25; // frame must be at least 25% of local peak to stay voiced
+  const ENERGY_HALF=8;
+  for(let i=0;i<frames.length;i++){
+    if(!frames[i].voiced) continue;
+    let localPeak=0;
+    for(let k=Math.max(0,i-ENERGY_HALF);k<=Math.min(frames.length-1,i+ENERGY_HALF);k++){
+      if(frames[k].rms>localPeak) localPeak=frames[k].rms;
+    }
+    if(frames[i].rms < localPeak*DROP_RATIO) frames[i].voiced=false;
   }
 
   // Pass 2: median smooth to suppress vibrato.
@@ -716,11 +733,21 @@ function analyzeBuffer(buf){
 
     for(let j=i+1;j<frames.length;j++){
       if(!frames[j].voiced){
+        // Count unvoiced frames
         let gap=0;
-        for(let g=j;g<Math.min(j+SP.gapBridge,frames.length);g++){
+        for(let g=j;g<frames.length;g++){
           if(!frames[g].voiced) gap++; else break;
         }
-        if(gap<SP.gapBridge){j+=gap-1;continue;} else break;
+        // Any gap >= gapBridge = end of note
+        if(gap>=SP.gapBridge) break;
+        // Short gap — check pitch after gap.
+        // If same semitone: ALWAYS end note (breath between repeated notes).
+        // If different pitch: bridge (legato glide through unvoiced).
+        const afterGap=j+gap;
+        if(afterGap<frames.length && frames[afterGap].voiced){
+          if(Math.round(frames[afterGap].midi)===Math.round(seedMidi)) break;
+        }
+        j+=gap-1; continue;
       }
 
       // dynamic center = median of last 12 voiced frames
@@ -810,6 +837,67 @@ function analyzeBuffer(buf){
     }
   }
 
+  // DEBUG: log all segments found after Pass 4
+  console.log('[segments after Pass4]', notes.map(n=>({
+    note:midiName(Math.round(n.midi)),
+    start:n.startTime.toFixed(2),
+    end:n.endTime.toFixed(2),
+    dur:((n.endTime-n.startTime)*1000).toFixed(0)+'ms'
+  })));
+
+  // Pass 4b: energy-dip splitter.
+  // For each note segment, scan the RAW audio RMS at HOP intervals.
+  // If a local energy minimum is found that is below DIP_RATIO of the note's
+  // peak energy, split the note there. This catches breaths that pitch-detection
+  // missed because the singer's breath was still voiced.
+  // Only split notes longer than MIN_SPLIT_MS to avoid fragmenting short notes.
+  const MIN_SPLIT_MS=180; // don't try to split notes shorter than this
+  const DIP_RATIO=0.35;   // dip must be below 35% of note peak to trigger split
+  const DIP_HOP=256;      // analysis hop for RMS scan (finer than pitch HOP)
+  const MIN_SPLIT_SAMPLES=Math.floor(sr*MIN_SPLIT_MS/1000);
+  let splitDone=true;
+  while(splitDone){
+    splitDone=false;
+    for(let ni=0;ni<notes.length;ni++){
+      const n=notes[ni];
+      const segLen=n.endSample-n.startSample;
+      if(segLen<MIN_SPLIT_SAMPLES*2) continue; // too short to split
+      // Scan RMS inside the note
+      const rmsArr=[];
+      for(let s=n.startSample;s+DIP_HOP<n.endSample;s+=DIP_HOP){
+        let e=0;
+        for(let k=s;k<s+DIP_HOP;k++) e+=data[k]*data[k];
+        rmsArr.push({s, rms:Math.sqrt(e/DIP_HOP)});
+      }
+      if(rmsArr.length<6) continue;
+      // Find peak RMS
+      const peak=Math.max(...rmsArr.map(r=>r.rms));
+      const threshold=peak*DIP_RATIO;
+      // Find deepest local minimum in the MIDDLE 60% of the note (avoid edges)
+      const margin=Math.floor(rmsArr.length*0.2);
+      let dipIdx=-1, dipVal=Infinity;
+      for(let k=margin;k<rmsArr.length-margin;k++){
+        if(rmsArr[k].rms<threshold && rmsArr[k].rms<dipVal){
+          dipVal=rmsArr[k].rms; dipIdx=k;
+        }
+      }
+      console.log('[dip scan]', midiName(Math.round(n.midi)), 'dur:'+(segLen/sr*1000).toFixed(0)+'ms', 'peak:'+peak.toFixed(4), 'thresh:'+threshold.toFixed(4), 'dipIdx:'+dipIdx, dipIdx>=0?'dipVal:'+dipVal.toFixed(4):'');
+      if(dipIdx===-1) continue;
+      // Split the note at the dip
+      const splitSample=rmsArr[dipIdx].s;
+      const splitTime=splitSample/sr;
+      // Minimum duration for each half
+      if(splitTime-n.startTime < MIN_SPLIT_MS/1000) continue;
+      if(n.endTime-splitTime < MIN_SPLIT_MS/1000) continue;
+      const first={...n, endSample:splitSample, endTime:splitTime};
+      const second={...n, startSample:splitSample, startTime:splitTime,
+        originalStartSample:splitSample};
+      notes.splice(ni,1,first,second);
+      splitDone=true;
+      break; // restart loop after any split
+    }
+  }
+
   // Pass 5: merge blobs of same note (fragments of ONE note only — not adjacent scale notes)
   // Stricter than before: only merge if the two fragments clearly belong to the same pitch.
   // Two fragments on adjacent semitones (e.g. E3 + F3) must NOT merge.
@@ -828,7 +916,7 @@ function analyzeBuffer(buf){
         //  - pitch difference is well under a semitone (≤ 0.6), AND
         //  - both fragments snap to the same target note.
         // This keeps fragments of ONE note together but separates E3 from F3.
-        if(gap<0.3 && semDiff<=0.6 && sameSnap){
+        if(gap<0.05 && semDiff<=0.6 && sameSnap){ // 50ms max — only detection glitches
           cur.endTime=next.endTime; cur.endSample=next.endSample;
           const avg=(cur.freq+next.freq)/2;
           cur.freq=avg; cur.midi=f2midi(avg); cur.midiOrig=cur.midi;
@@ -885,11 +973,11 @@ const ec=edCanvas.getContext('2d');
 // PIANO_W removed — no piano sidebar
 const ROW_H_DEFAULT=22,PX_PER_SEC_DEFAULT=150;
 let ROW_H=ROW_H_DEFAULT;
-let MIDI_MIN=36,MIDI_MAX=84;
+let MIDI_MIN=28,MIDI_MAX=84; // 28=E1, covers bass range
 let MIDI_RANGE=MIDI_MAX-MIDI_MIN;
 
 function updateMidiRange(){
-  if(!notes.length){ MIDI_MIN=36;MIDI_MAX=84;MIDI_RANGE=48;return; }
+  if(!notes.length){ MIDI_MIN=28;MIDI_MAX=84;MIDI_RANGE=56;return; }
   const lo=Math.floor(Math.min(...notes.map(n=>n.midi)))-3; // 3 semitone padding
   const hi=Math.ceil( Math.max(...notes.map(n=>n.midi)))+3;
   MIDI_MIN=Math.max(0,  lo);
