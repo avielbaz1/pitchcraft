@@ -625,8 +625,8 @@ function analyzeBuffer(buf){
   // Note boundaries are protected: if any frame in the window deviates by more than
   // BOUNDARY_GUARD semitones from the current frame, smoothing is skipped — real
   // pitch changes break the condition and leave boundary frames intact.
-  const SMOOTH_HALF=4; // ±4 frames = 9-frame window ≈ 104ms
-  const BOUNDARY_GUARD=2.0; // semitones
+  const SMOOTH_HALF=6; // ±6 frames = 13-frame window ≈ 150ms
+  const BOUNDARY_GUARD=3.0; // semitones — allows vibrato without stopping smoothing
   for(let i=SMOOTH_HALF;i<frames.length-SMOOTH_HALF;i++){
     if(!frames[i].voiced) continue;
     const vals=[];
@@ -640,6 +640,22 @@ function analyzeBuffer(buf){
     vals.sort((a,b)=>a-b);
     frames[i].midi=vals[Math.floor(vals.length/2)];
     frames[i].freq=midi2f(frames[i].midi);
+    // Never re-voice a frame that was marked unvoiced before smoothing
+    // (protected by the voiced check at start of loop)
+  }
+
+  // Pass 2.5: re-apply breath detection after smoothing.
+  // Smoothing can restore voiced=true on breath frames.
+  // Any frame whose RMS is < 40% of both its neighbors is a breath — silence it.
+  for(let i=1;i<frames.length-1;i++){
+    if(!frames[i].voiced) continue;
+    // Use MAX of neighbors — robust to volume fade during singing
+    // Look wider: ±3 frames to find true local peak around this frame
+    let localRef=0;
+    for(let k=Math.max(0,i-3);k<=Math.min(frames.length-1,i+3);k++){
+      if(k!==i && frames[k].rms>localRef) localRef=frames[k].rms;
+    }
+    if(localRef>0 && frames[i].rms < localRef*0.25) frames[i].voiced=false;
   }
 
   // Pass 2b: octave outlier removal.
@@ -703,9 +719,21 @@ function analyzeBuffer(buf){
         }
         // Any gap >= gapBridge = end of note
         if(gap>=SP.gapBridge) break;
-        // Single-frame gap: check if pitch after gap is same semitone.
-        // If yes — this is a breath between repeated notes, split here.
-        // If no — bridge it (legato transition between different notes).
+        // Short gap: check pitch after gap.
+        // Skip octave-error frames (>6st from seedMidi), find first stable frame.
+        // If same note (within sameNote+0.5st) → breath between repeated notes → split.
+        // If different note → legato → bridge.
+        if(gap>=1){
+          let splitGap=false;
+          for(let k=j+gap;k<Math.min(frames.length,j+gap+5);k++){
+            if(!frames[k].voiced) continue;
+            const diff=Math.abs(frames[k].midi-seedMidi);
+            if(diff>6) continue; // skip octave error frame
+            if(diff<=SP.sameNote+0.5) splitGap=true;
+            break;
+          }
+          if(splitGap) break;
+        }
         j+=gap-1; continue;
       }
 
