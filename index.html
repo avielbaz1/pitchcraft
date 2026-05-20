@@ -573,7 +573,7 @@ function getSensParams(){
     confirmMd:   [0,   4,   3,   2,   2,   1][v], // for medium jumps 1.5-2.5st
     confirmLg:   [0,   2,   2,   1,   1,   1][v], // for large jumps >2.5st
     minMs:       [0, 150, 130, 100,  80,  60][v],
-    gapBridge:   [0,   6,   5,   4,   3,   2][v],
+    gapBridge:   [0,   6,   5,   2,   2,   1][v],
   };
 }
 let notes=[];
@@ -644,20 +644,6 @@ function analyzeBuffer(buf){
     // (protected by the voiced check at start of loop)
   }
 
-  // Pass 2.5: re-apply breath detection after smoothing.
-  // Smoothing can restore voiced=true on breath frames.
-  // Any frame whose RMS is < 40% of both its neighbors is a breath — silence it.
-  for(let i=1;i<frames.length-1;i++){
-    if(!frames[i].voiced) continue;
-    // Use MAX of neighbors — robust to volume fade during singing
-    // Look wider: ±3 frames to find true local peak around this frame
-    let localRef=0;
-    for(let k=Math.max(0,i-3);k<=Math.min(frames.length-1,i+3);k++){
-      if(k!==i && frames[k].rms>localRef) localRef=frames[k].rms;
-    }
-    if(localRef>0 && frames[i].rms < localRef*0.25) frames[i].voiced=false;
-  }
-
   // Pass 2b: octave outlier removal.
   // A frame whose pitch is 7+ semitones from BOTH its nearest voiced neighbours
   // is almost certainly an octave detection error. Mark it unvoiced so it cannot
@@ -711,6 +697,22 @@ function analyzeBuffer(buf){
     }
 
     for(let j=i+1;j<frames.length;j++){
+      // Onset detection: if RMS jumps up sharply AND pitch is same → new repeated note
+      // Energy dip detection: track rolling peak and find dips
+      // If RMS drops below DIP_FRAC of recent peak then rises again → new note
+      if(frames[j].voiced && j>i+3){
+        // Rolling peak over last 4 frames
+        let recentPeak=0;
+        for(let k=Math.max(i,j-4);k<j;k++) if(frames[k].rms>recentPeak) recentPeak=frames[k].rms;
+        // Check if current frame is recovering from a dip
+        const minRecent=Math.min(frames[j-1].rms,frames[j-2].rms);
+        const DIP_FRAC=0.65; // dip must reach below 65% of recent peak
+        const RECOVER_FRAC=1.15; // recovery must be 15% above the dip
+        if(recentPeak>0 && minRecent<recentPeak*DIP_FRAC && frames[j].rms>minRecent*RECOVER_FRAC){
+          const pitchDiff=Math.abs(frames[j].midi-seedMidi);
+          if(pitchDiff<=2.0) break; // same note recovering from dip = new note
+        }
+      }
       if(!frames[j].voiced){
         // Count unvoiced frames
         let gap=0;
@@ -874,7 +876,7 @@ function analyzeBuffer(buf){
       const ctx=ctxMidis.reduce((s,v)=>s+v,0)/ctxMidis.length;
       const dist=Math.abs(midi-ctx);
       // Only act on near-octave jumps (9–15st) — catches both 8va and 8vb errors
-      if(dist>=9&&dist<=15){
+      if(dist>=7&&dist<=17){
         const downDist=Math.abs((midi-12)-ctx);
         const upDist  =Math.abs((midi+12)-ctx);
         if(downDist<dist&&downDist<upDist){
