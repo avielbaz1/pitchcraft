@@ -352,7 +352,7 @@ function detectPitch(buf,sr){
 
   let freq=sr/bestL;
 
-  // Octave correction
+  // Octave correction — upward only (original behaviour)
   if(freq>55&&freq<400){
     const halfLag=Math.round(bestL/2);
     if(halfLag>=minP&&halfLag<n/2){
@@ -572,7 +572,7 @@ function getSensParams(){
     confirmSm:   [0,   7,   5,   4,   3,   2][v], // for small jumps <1.5st
     confirmMd:   [0,   4,   3,   2,   2,   1][v], // for medium jumps 1.5-2.5st
     confirmLg:   [0,   2,   2,   1,   1,   1][v], // for large jumps >2.5st
-    minMs:       [0, 150, 130, 100,  80,  60][v],
+    minMs:       [0, 120, 100,  60,  50,  40][v],
     gapBridge:   [0,   6,   5,   2,   2,   1][v],
   };
 }
@@ -696,21 +696,21 @@ function analyzeBuffer(buf){
       if(frames[k].voiced) rollingMidis.push(frames[k].midi);
     }
 
+    let segPeak=frames[i].rms;
     for(let j=i+1;j<frames.length;j++){
-      // Onset detection: if RMS jumps up sharply AND pitch is same → new repeated note
-      // Energy dip detection: track rolling peak and find dips
-      // If RMS drops below DIP_FRAC of recent peak then rises again → new note
+      // Onset detection: RMS dip + recovery OR sharp RMS rise → new repeated note
       if(frames[j].voiced && j>i+3){
-        // Rolling peak over last 4 frames
-        let recentPeak=0;
-        for(let k=Math.max(i,j-4);k<j;k++) if(frames[k].rms>recentPeak) recentPeak=frames[k].rms;
-        // Check if current frame is recovering from a dip
-        const minRecent=Math.min(frames[j-1].rms,frames[j-2].rms);
-        const DIP_FRAC=0.65; // dip must reach below 65% of recent peak
-        const RECOVER_FRAC=1.15; // recovery must be 15% above the dip
-        if(recentPeak>0 && minRecent<recentPeak*DIP_FRAC && frames[j].rms>minRecent*RECOVER_FRAC){
-          const pitchDiff=Math.abs(frames[j].midi-seedMidi);
-          if(pitchDiff<=2.0) break; // same note recovering from dip = new note
+        if(frames[j].rms>segPeak) segPeak=frames[j].rms;
+        const prevRms=frames[j-1].rms;
+        const pitchDiff=Math.abs(frames[j].midi-seedMidi);
+        if(pitchDiff<=2.0){
+          // Method A: RMS dip then recovery
+          const minRecent=Math.min(prevRms, j>1?frames[j-2].rms:prevRms);
+          const DIP_FRAC=seedMidi<48?0.75:seedMidi<54?0.68:0.58;
+          if(segPeak>0 && minRecent<segPeak*DIP_FRAC && frames[j].rms>minRecent*1.12) break;
+          // Method B: Sharp RMS rise (onset) — current frame is 60%+ louder than previous
+          // previous must be well below segPeak, and segment must be old enough (>8 frames)
+          if(prevRms>0 && frames[j].rms/prevRms>1.6 && prevRms<segPeak*0.75 && j-i>8) break;
         }
       }
       if(!frames[j].voiced){
