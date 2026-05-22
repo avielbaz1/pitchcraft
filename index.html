@@ -572,7 +572,7 @@ function getSensParams(){
     confirmSm:   [0,   7,   5,   4,   3,   2][v], // for small jumps <1.5st
     confirmMd:   [0,   4,   3,   2,   2,   1][v], // for medium jumps 1.5-2.5st
     confirmLg:   [0,   2,   2,   1,   1,   1][v], // for large jumps >2.5st
-    minMs:       [0, 120, 100,  60,  50,  40][v],
+    minMs:       [0, 150, 120,  90,  70,  50][v],
     gapBridge:   [0,   6,   5,   2,   2,   1][v],
   };
 }
@@ -605,16 +605,101 @@ function analyzeBuffer(buf){
   const WIN=2048,HOP=512;
   const frames=[];
 
-  // Pass 1: detect pitch at every hop
+  // Pass 1: detect pitch + spectral flux at every hop.
+  // Flux uses 8 sub-bands (fast approximation) — captures onset energy
+  // without expensive DFT. Each band = RMS of a frequency region.
+  // Flux = sum of positive band-energy increases between frames.
+  const N_BANDS=8;
+  const BAND_SIZE=Math.floor(WIN/2/N_BANDS);
+  let prevBands=new Float32Array(N_BANDS);
   for(let i=0;i+WIN<data.length;i+=HOP){
     const sl=data.slice(i,i+WIN);
     const{freq,rms}=detectPitch(sl,sr);
+    // Compute sub-band energies via simple DFT for N_BANDS centre freqs
+    const bands=new Float32Array(N_BANDS);
+    for(let b=0;b<N_BANDS;b++){
+      // Centre frequency of this band
+      const k0=(b+0.5)*BAND_SIZE;
+      let re=0,im=0;
+      // Use Goertzel-like sum over WIN samples
+      for(let n=0;n<WIN;n+=2){ // stride 2 for speed — good enough for flux
+        const a=2*Math.PI*k0*n/WIN;
+        re+=sl[n]*Math.cos(a);
+        im+=sl[n]*Math.sin(a);
+      }
+      bands[b]=Math.sqrt(re*re+im*im)/(WIN/2);
+    }
+    // Spectral flux = half-wave rectified sum of band increases
+    let flux=0;
+    for(let b=0;b<N_BANDS;b++){
+      const diff=bands[b]-prevBands[b];
+      if(diff>0) flux+=diff;
+    }
+    prevBands=bands;
     frames.push({
       samplePos:i, t:i/sr,
       freq:freq>0?freq:0,
       midi:freq>0?f2midi(freq):0,
-      voiced:freq>0&&rms>0.002, rms
+      voiced:freq>0&&rms>0.002, rms, flux
     });
+  }
+
+  // Pass 1.5: normalize flux and mark onset frames.
+  // For each frame, compute if it's an onset: flux significantly above local median.
+  // Local median over ±15 frames — robust to overall flux level changes.
+  // onset[i] = true if flux[i] > ONSET_MULTIPLIER * localMedian AND rms dipped before it.
+  const ONSET_MULT=10.0;
+  const ONSET_HALF=15;
+  const ONSET_MIN_GAP=Math.ceil(0.22*sr/512); // min 220ms between onsets
+  // Step 1: find raw flux peaks
+  for(let i=0;i<frames.length;i++){
+    frames[i].onset=false;
+    if(!frames[i].voiced||frames[i].flux===undefined) continue;
+    if(i>0&&i<50&&frames[i].midi>0) console.log('[flux]',i,frames[i].t.toFixed(2),'flux:'+frames[i].flux.toFixed(4),'rms:'+frames[i].rms.toFixed(4));
+    const fluxWin=[];
+    for(let k=Math.max(0,i-ONSET_HALF);k<=Math.min(frames.length-1,i+ONSET_HALF);k++){
+      if(frames[k].flux>0) fluxWin.push(frames[k].flux);
+    }
+    if(fluxWin.length<5) continue;
+    fluxWin.sort((a,b)=>a-b);
+    const medFlux=fluxWin[Math.floor(fluxWin.length/2)];
+    if(medFlux<=0) continue;
+    let lPeak=0;
+    for(let k=Math.max(0,i-10);k<i-1;k++) if(frames[k].rms>lPeak) lPeak=frames[k].rms;
+    const lMin=i>1?Math.min(frames[i-1].rms,frames[i-2].rms):frames[i-1]?.rms||0;
+    const dipped=lPeak>0&&lMin<lPeak*0.75;
+    frames[i].onset=frames[i].flux>medFlux*ONSET_MULT&&dipped;
+  }
+  // Suppress onsets that are too close together (vibrato creates clusters)
+  let lastOnset=-999;
+  for(let i=0;i<frames.length;i++){
+    if(frames[i].onset){
+      if(i-lastOnset<ONSET_MIN_GAP) frames[i].onset=false;
+      else lastOnset=i;
+    }
+  }
+  // Step 2: suppress periodic onsets (vibrato).
+  // Vibrato onsets repeat every 8-20 frames (~90-230ms at HOP=512).
+  // If two onsets are within 20 frames of each other AND there's another pair nearby,
+  // they're likely vibrato — suppress them.
+  for(let i=1;i<frames.length-1;i++){
+    if(!frames[i].onset) continue;
+    // Find previous onset
+    let prevOnset=-1;
+    for(let k=i-1;k>=Math.max(0,i-25);k--){if(frames[k].onset){prevOnset=k;break;}}
+    if(prevOnset<0) continue;
+    const period=i-prevOnset;
+    if(period<8||period>22) continue; // not vibrato-range period
+    // Check if there's another onset ~1 period before prevOnset (confirms periodicity)
+    let prevPrevOnset=-1;
+    for(let k=prevOnset-1;k>=Math.max(0,prevOnset-period-3);k--){
+      if(frames[k].onset){prevPrevOnset=k;break;}
+    }
+    if(prevPrevOnset>=0&&Math.abs((prevOnset-prevPrevOnset)-period)<=3){
+      // Periodic pattern confirmed — suppress all three as vibrato
+      frames[i].onset=false;
+      frames[prevOnset].onset=false;
+    }
   }
 
   // Pass 2: median smooth to suppress vibrato.
@@ -696,22 +781,12 @@ function analyzeBuffer(buf){
       if(frames[k].voiced) rollingMidis.push(frames[k].midi);
     }
 
-    let segPeak=frames[i].rms;
     for(let j=i+1;j<frames.length;j++){
-      // Onset detection: RMS dip + recovery OR sharp RMS rise → new repeated note
-      if(frames[j].voiced && j>i+3){
-        if(frames[j].rms>segPeak) segPeak=frames[j].rms;
-        const prevRms=frames[j-1].rms;
+      // Onset detection: use pre-computed onset flags (Pass 1.5).
+      // onset[j] = true if spectral flux spike + RMS dip → new repeated note.
+      if(frames[j].voiced && frames[j].onset && j-i>8){
         const pitchDiff=Math.abs(frames[j].midi-seedMidi);
-        if(pitchDiff<=2.0){
-          // Method A: RMS dip then recovery
-          const minRecent=Math.min(prevRms, j>1?frames[j-2].rms:prevRms);
-          const DIP_FRAC=seedMidi<48?0.75:seedMidi<54?0.68:0.58;
-          if(segPeak>0 && minRecent<segPeak*DIP_FRAC && frames[j].rms>minRecent*1.12) break;
-          // Method B: Sharp RMS rise (onset) — current frame is 60%+ louder than previous
-          // previous must be well below segPeak, and segment must be old enough (>8 frames)
-          if(prevRms>0 && frames[j].rms/prevRms>1.6 && prevRms<segPeak*0.75 && j-i>8) break;
-        }
+        if(pitchDiff<=2.5) break; // same pitch onset = split here
       }
       if(!frames[j].voiced){
         // Count unvoiced frames
@@ -863,20 +938,28 @@ function analyzeBuffer(buf){
   // an octave-detection error for the whole segment. Shift it by ±12 to match context.
   // Only correct if the shifted version is closer to neighbours than the original.
   // Run twice to catch chains.
-  for(let pass=0;pass<2;pass++){
+  for(let pass=0;pass<4;pass++){
     for(let n=0;n<notes.length;n++){
+      // Look up to 2 neighbours each side for context — handles chains of errors
+      const prev2=n>1?notes[n-2]:null;
       const prev=n>0?notes[n-1]:null;
       const next=n<notes.length-1?notes[n+1]:null;
-      if(!prev&&!next) continue;
+      const next2=n<notes.length-2?notes[n+2]:null;
+      if(!prev&&!next&&!prev2&&!next2) continue;
       const midi=notes[n].midi;
-      // build a "context center" from available neighbours
+      // build context from up to 4 neighbours, weighted by proximity
       const ctxMidis=[];
-      if(prev) ctxMidis.push(prev.midi);
-      if(next) ctxMidis.push(next.midi);
-      const ctx=ctxMidis.reduce((s,v)=>s+v,0)/ctxMidis.length;
+      if(prev) ctxMidis.push(prev.midi,prev.midi); // double weight for immediate neighbours
+      if(next) ctxMidis.push(next.midi,next.midi);
+      if(prev2) ctxMidis.push(prev2.midi);
+      if(next2) ctxMidis.push(next2.midi);
+      if(ctxMidis.length===0) continue;
+      // Use median instead of mean — robust to cases where some neighbours are also wrong
+      ctxMidis.sort((a,b)=>a-b);
+      const ctx=ctxMidis[Math.floor(ctxMidis.length/2)];
       const dist=Math.abs(midi-ctx);
       // Only act on near-octave jumps (9–15st) — catches both 8va and 8vb errors
-      if(dist>=7&&dist<=17){
+      if(dist>=5&&dist<=17){
         const downDist=Math.abs((midi-12)-ctx);
         const upDist  =Math.abs((midi+12)-ctx);
         if(downDist<dist&&downDist<upDist){
