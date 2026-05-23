@@ -323,64 +323,66 @@ function snapMidi(midi){
 }
 function cents(midi){return Math.round((midi-snapMidi(midi))*100);}
 
-// ══ PITCH DETECTION — Normalized Autocorrelation ════════════
-function detectPitch(buf,sr){
-  const n=buf.length;
-  let rms=0;for(let i=0;i<n;i++)rms+=buf[i]*buf[i];rms=Math.sqrt(rms/n);
-  if(rms<0.002)return{freq:-1,rms};
+// ══ PITCH DETECTION — YIN (CMND) ════════════════════════════
+function detectPitch(buf, sr) {
+  const n = buf.length;
+  let rms = 0; for (let i = 0; i < n; i++) rms += buf[i]*buf[i]; rms = Math.sqrt(rms/n);
+  if (rms < 0.005) return { freq: -1, rms };
 
-  // Full vocal range: 55Hz-1100Hz
-  const minP=Math.floor(sr/1100),maxP=Math.ceil(sr/55);
-  let bestR=-1,bestL=-1;
-  for(let lag=minP;lag<=maxP&&lag<n/2;lag++){
-    let num=0,d1=0,d2=0;
-    for(let i=0;i<n-lag;i++){
-      num+=buf[i]*buf[i+lag];
-      d1+=buf[i]*buf[i];
-      d2+=buf[i+lag]*buf[i+lag];
-    }
-    const r=(d1*d2)>0?num/Math.sqrt(d1*d2):0;
-    if(r>bestR){bestR=r;bestL=lag;}
-  }
-  if(bestR<0.4||bestL<1)return{freq:-1,rms};
+  const minP = Math.floor(sr / 1100);
+  const maxP = Math.min(Math.ceil(sr / 38), Math.floor(n / 2));
 
-  // Parabolic refinement
-  if(bestL>minP&&bestL<n/2-1){
-    const r0=getR(buf,n,bestL-1),r1=bestR,r2=getR(buf,n,bestL+1);
-    const d=2*r1-r0-r2;if(d>0)bestL+=0.5*(r0-r2)/d;
+  // 1. Difference function
+  const diff = new Float32Array(maxP + 1);
+  const sos  = new Float32Array(n + 1);
+  for (let i = 0; i < n; i++) sos[i+1] = sos[i] + buf[i]*buf[i];
+  for (let tau = minP; tau <= maxP; tau++) {
+    let acf = 0;
+    for (let i = 0; i < n - tau; i++) acf += buf[i] * buf[i+tau];
+    diff[tau] = sos[n-tau] + (sos[n]-sos[tau]) - 2*acf;
   }
 
-  let freq=sr/bestL;
-
-  // Octave correction — bidirectional.
-  // (A) If freq < 400 Hz, check if the half-lag (double freq) also has a strong peak.
-  //     If it does AND its correlation is close to bestR → the true pitch may be one octave UP.
-  //     Threshold tightened to 0.90 to avoid false up-shifts on rich/complex timbres.
-  if(freq>55&&freq<400){
-    const halfLag=Math.round(bestL/2);
-    if(halfLag>=minP&&halfLag<n/2){
-      const rDouble=getR(buf,n,halfLag);
-      if(rDouble>bestR*0.90) freq*=2;
-    }
+  // 2. CMND
+  const cmnd = new Float32Array(maxP + 1); cmnd[0] = 1;
+  let run = 0;
+  for (let tau = 1; tau <= maxP; tau++) {
+    run += diff[tau];
+    cmnd[tau] = run === 0 ? 1 : diff[tau] / ((1/tau) * run);
   }
-  // (B) If freq > 300 Hz, check if double-lag (half freq) is also strong.
-  //     Autocorrelation sometimes picks up the 2nd harmonic period instead of fundamental.
-  //     If the double-lag correlation is strong (>0.85) → shift down one octave.
-  //     Only apply when the resulting freq would be in the vocal range (>55 Hz).
-  if(freq>300&&freq<1100){
-    const dblLag=Math.round(bestL*2);
-    if(dblLag<=maxP&&dblLag<n/2){
-      const rHalf=getR(buf,n,dblLag);
-      if(rHalf>bestR*0.85) freq/=2;
+
+  // 3. First dip below threshold
+  const THR = 0.18;
+  const dips = [];
+  for (let tau = minP+1; tau < maxP; tau++)
+    if (cmnd[tau] < cmnd[tau-1] && cmnd[tau] < cmnd[tau+1]) dips.push({ tau, val: cmnd[tau] });
+
+  let bestL = -1;
+  if (dips.length > 0) {
+    let early = -1;
+    for (const d of dips) { if (d.val < THR) { early = d.tau; break; } }
+    if (early !== -1) {
+      bestL = early;
+      for (const d of dips) {
+        if (d.tau > early*1.8 && d.tau < early*4.2 && d.val < cmnd[Math.floor(early)]*0.5) { bestL = d.tau; break; }
+      }
+    } else {
+      bestL = dips.reduce((a,b) => b.val < a.val ? b : a).tau;
     }
   }
+  if (bestL === -1) {
+    let mv = 1; for (let tau = minP; tau <= maxP; tau++) if (cmnd[tau] < mv) { mv = cmnd[tau]; bestL = tau; }
+    if (mv > 0.5) return { freq: -1, rms };
+  }
 
-  return{freq:(freq>55&&freq<1100)?freq:-1,rms};
-}
-function getR(buf,n,lag){
-  let num=0,d1=0,d2=0;
-  for(let i=0;i<n-lag;i++){num+=buf[i]*buf[i+lag];d1+=buf[i]*buf[i];d2+=buf[i+lag]*buf[i+lag];}
-  return(d1*d2)>0?num/Math.sqrt(d1*d2):0;
+  // 4. Parabolic refinement
+  if (bestL > minP && bestL < maxP) {
+    const v1=cmnd[Math.floor(bestL)-1], v2=cmnd[Math.floor(bestL)], v3=cmnd[Math.floor(bestL)+1];
+    const den = v1 - 2*v2 + v3;
+    if (Math.abs(den) > 1e-6) bestL += 0.5*(v1-v3)/den;
+  }
+
+  const freq = sr / bestL;
+  return { freq: (freq > 38 && freq < 1200) ? freq : -1, rms };
 }
 
 // ══ SCREEN MANAGEMENT ════════════════════════════════════════
@@ -561,6 +563,11 @@ async function loadAudioFromUrl(urlOrBuffer,name){
   requestAnimationFrame(()=>{
     PX_PER_SEC=PX_PER_SEC_DEFAULT;
     updateMidiRange();
+    // Auto-fit vertical zoom so the note range fills ~70% of screen height
+    const wrap=document.querySelector('.editor-wrap');
+    const availH=(wrap?wrap.clientHeight:500)*0.85;
+    const targetRowH=Math.floor(availH/Math.max(MIDI_RANGE,8));
+    ROW_H=Math.max(14,Math.min(36,targetRowH));
     initEditorCanvas();
     drawEditor();
     updateMinimap();
@@ -613,391 +620,209 @@ function undo(){
   drawEditor();
 }
 
-function analyzeBuffer(buf){
-  const sr=buf.sampleRate;
-  const data=buf.getChannelData(0);
-  const WIN=2048,HOP=512;
-  const frames=[];
+// ── RMS dip detector ──────────────────────────────────────────
+function findRmsDips(voicedFrames, HOP_MS) {
+  const MIN_FRAMES = Math.ceil(80 / HOP_MS);
+  if (voicedFrames.length < MIN_FRAMES * 2) return [];
+  const sm = voicedFrames.map((f, idx) => {
+    let sum = 0, cnt = 0;
+    for (let k = Math.max(0, idx-2); k <= Math.min(voicedFrames.length-1, idx+2); k++) { sum += voicedFrames[k].rms; cnt++; }
+    return sum / cnt;
+  });
+  // Adaptive threshold: require deeper dip for lower pitches (more breath noise)
+  const avgMidi = voicedFrames.reduce((s,f)=>s+f.midi,0)/voicedFrames.length;
+  const dipThresh = avgMidi < 52 ? 0.55 : 0.65; // stricter for low notes
 
-  // Pass 1: detect pitch + spectral flux at every hop.
-  // Flux uses 8 sub-bands (fast approximation) — captures onset energy
-  // without expensive DFT. Each band = RMS of a frequency region.
-  // Flux = sum of positive band-energy increases between frames.
-  const N_BANDS=8;
-  const BAND_SIZE=Math.floor(WIN/2/N_BANDS);
-  let prevBands=new Float32Array(N_BANDS);
-  for(let i=0;i+WIN<data.length;i+=HOP){
-    const sl=data.slice(i,i+WIN);
-    const{freq,rms}=detectPitch(sl,sr);
-    // Compute sub-band energies via simple DFT for N_BANDS centre freqs
-    const bands=new Float32Array(N_BANDS);
-    for(let b=0;b<N_BANDS;b++){
-      // Centre frequency of this band
-      const k0=(b+0.5)*BAND_SIZE;
-      let re=0,im=0;
-      // Use Goertzel-like sum over WIN samples
-      for(let n=0;n<WIN;n+=2){ // stride 2 for speed — good enough for flux
-        const a=2*Math.PI*k0*n/WIN;
-        re+=sl[n]*Math.cos(a);
-        im+=sl[n]*Math.sin(a);
-      }
-      bands[b]=Math.sqrt(re*re+im*im)/(WIN/2);
+  const cands = [];
+  for (let s = MIN_FRAMES; s < voicedFrames.length - MIN_FRAMES; s++) {
+    if (sm[s] >= sm[s-1] || sm[s] >= sm[s+1]) continue;
+    const lMax = sm.slice(Math.max(0,s-15), s).reduce((a,b)=>Math.max(a,b), 0);
+    const rMax = sm.slice(s+1, Math.min(sm.length,s+16)).reduce((a,b)=>Math.max(a,b), 0);
+    const pk = Math.min(lMax, rMax);
+    if (pk <= 0.001) continue;
+    const ratio = sm[s] / pk;
+    if (ratio < dipThresh) cands.push({ idx: s, ratio });
+  }
+  cands.sort((a,b) => a.idx - b.idx);
+  const sel = [];
+  let ci = 0;
+  while (ci < cands.length) {
+    let best = cands[ci]; let j = ci + 1;
+    while (j < cands.length && cands[j].idx - best.idx < MIN_FRAMES) {
+      if (cands[j].ratio < best.ratio) best = cands[j]; j++;
     }
-    // Spectral flux = half-wave rectified sum of band increases
-    let flux=0;
-    for(let b=0;b<N_BANDS;b++){
-      const diff=bands[b]-prevBands[b];
-      if(diff>0) flux+=diff;
-    }
-    prevBands=bands;
+    sel.push(best.idx); ci = j;
+  }
+  return sel;
+}
+
+function splitOnRmsDips(voicedFrames, HOP_MS) {
+  const idxs = findRmsDips(voicedFrames, HOP_MS);
+  if (!idxs.length) return [voicedFrames];
+  const parts = []; let prev = -1;
+  for (const idx of idxs) { const p = voicedFrames.slice(prev+1, idx); if (p.length) parts.push(p); prev = idx; }
+  const last = voicedFrames.slice(prev+1); if (last.length) parts.push(last);
+  return parts;
+}
+
+function analyzeBuffer(buf) {
+  const sr  = buf.sampleRate;
+  const data = buf.getChannelData(0);
+  const WIN = 4096, HOP = 512;
+  const frames = [];
+
+  // Pass 1 — YIN pitch detection per frame
+  for (let i = 0; i + WIN < data.length; i += HOP) {
+    const sl = data.subarray(i, i + WIN);
+    const { freq, rms } = detectPitch(sl, sr);
     frames.push({
-      samplePos:i, t:i/sr,
-      freq:freq>0?freq:0,
-      midi:freq>0?f2midi(freq):0,
-      voiced:freq>0&&rms>0.002, rms, flux
+      samplePos: i, t: i / sr,
+      freq:  freq > 0 ? freq : 0,
+      midi:  freq > 0 ? f2midi(freq) : 0,
+      voiced: freq > 0 && rms > 0.005, rms
     });
   }
 
-  // Pass 1.5: normalize flux and mark onset frames.
-  // For each frame, compute if it's an onset: flux significantly above local median.
-  // Local median over ±15 frames — robust to overall flux level changes.
-  // onset[i] = true if flux[i] > ONSET_MULTIPLIER * localMedian AND rms dipped before it.
-  const ONSET_MULT=10.0;
-  const ONSET_HALF=15;
-  const ONSET_MIN_GAP=Math.ceil(0.22*sr/512); // min 220ms between onsets
-  // Step 1: find raw flux peaks
-  for(let i=0;i<frames.length;i++){
-    frames[i].onset=false;
-    if(!frames[i].voiced||frames[i].flux===undefined) continue;
-    if(i>0&&i<50&&frames[i].midi>0) console.log('[flux]',i,frames[i].t.toFixed(2),'flux:'+frames[i].flux.toFixed(4),'rms:'+frames[i].rms.toFixed(4));
-    const fluxWin=[];
-    for(let k=Math.max(0,i-ONSET_HALF);k<=Math.min(frames.length-1,i+ONSET_HALF);k++){
-      if(frames[k].flux>0) fluxWin.push(frames[k].flux);
+  // Pass 2 — median smooth (vibrato suppression)
+  const SMOOTH_HALF = 10, VIBRATO_GUARD = 3.5;
+  for (let i = SMOOTH_HALF; i < frames.length - SMOOTH_HALF; i++) {
+    if (!frames[i].voiced) continue;
+    const nb = [];
+    for (let k = i - SMOOTH_HALF; k <= i + SMOOTH_HALF; k++) {
+      if (frames[k].voiced && Math.abs(frames[k].midi - frames[i].midi) < VIBRATO_GUARD)
+        nb.push(frames[k].midi);
     }
-    if(fluxWin.length<5) continue;
-    fluxWin.sort((a,b)=>a-b);
-    const medFlux=fluxWin[Math.floor(fluxWin.length/2)];
-    if(medFlux<=0) continue;
-    let lPeak=0;
-    for(let k=Math.max(0,i-10);k<i-1;k++) if(frames[k].rms>lPeak) lPeak=frames[k].rms;
-    const lMin=i>1?Math.min(frames[i-1].rms,frames[i-2].rms):frames[i-1]?.rms||0;
-    const dipped=lPeak>0&&lMin<lPeak*0.75;
-    frames[i].onset=frames[i].flux>medFlux*ONSET_MULT&&dipped;
-  }
-  // Suppress onsets that are too close together (vibrato creates clusters)
-  let lastOnset=-999;
-  for(let i=0;i<frames.length;i++){
-    if(frames[i].onset){
-      if(i-lastOnset<ONSET_MIN_GAP) frames[i].onset=false;
-      else lastOnset=i;
-    }
-  }
-  // Step 2: suppress periodic onsets (vibrato).
-  // Vibrato onsets repeat every 8-20 frames (~90-230ms at HOP=512).
-  // If two onsets are within 20 frames of each other AND there's another pair nearby,
-  // they're likely vibrato — suppress them.
-  for(let i=1;i<frames.length-1;i++){
-    if(!frames[i].onset) continue;
-    // Find previous onset
-    let prevOnset=-1;
-    for(let k=i-1;k>=Math.max(0,i-25);k--){if(frames[k].onset){prevOnset=k;break;}}
-    if(prevOnset<0) continue;
-    const period=i-prevOnset;
-    if(period<8||period>22) continue; // not vibrato-range period
-    // Check if there's another onset ~1 period before prevOnset (confirms periodicity)
-    let prevPrevOnset=-1;
-    for(let k=prevOnset-1;k>=Math.max(0,prevOnset-period-3);k--){
-      if(frames[k].onset){prevPrevOnset=k;break;}
-    }
-    if(prevPrevOnset>=0&&Math.abs((prevOnset-prevPrevOnset)-period)<=3){
-      // Periodic pattern confirmed — suppress all three as vibrato
-      frames[i].onset=false;
-      frames[prevOnset].onset=false;
-    }
+    if (nb.length < 8) continue;
+    nb.sort((a,b) => a-b);
+    const med = nb[Math.floor(nb.length/2)];
+    if (Math.abs(frames[i].midi - med) > 0.7) { frames[i].midi = med; frames[i].freq = midi2f(med); }
   }
 
-  // Pass 2: median smooth to suppress vibrato.
-  // Vibrato is typically 5–6 Hz → period ~170–200ms.
-  // At HOP=512 @44.1kHz one frame ≈ 11.6ms → need ~15 frames to cover one full cycle.
-  // A 21-frame window (±10, ~240ms) ensures the median always spans at least one full
-  // vibrato oscillation and settles on the stable center pitch.
-  // Note boundaries are protected: if any frame in the window deviates by more than
-  // BOUNDARY_GUARD semitones from the current frame, smoothing is skipped — real
-  // pitch changes break the condition and leave boundary frames intact.
-  const SMOOTH_HALF=6; // ±6 frames = 13-frame window ≈ 150ms
-  const BOUNDARY_GUARD=3.0; // semitones — allows vibrato without stopping smoothing
-  for(let i=SMOOTH_HALF;i<frames.length-SMOOTH_HALF;i++){
-    if(!frames[i].voiced) continue;
-    const vals=[];
-    let tooFar=false;
-    for(let k=i-SMOOTH_HALF;k<=i+SMOOTH_HALF;k++){
-      if(!frames[k].voiced) continue;
-      if(Math.abs(frames[k].midi-frames[i].midi)>BOUNDARY_GUARD){tooFar=true;break;}
-      vals.push(frames[k].midi);
-    }
-    if(tooFar||vals.length<5) continue;
-    vals.sort((a,b)=>a-b);
-    frames[i].midi=vals[Math.floor(vals.length/2)];
-    frames[i].freq=midi2f(frames[i].midi);
-    // Never re-voice a frame that was marked unvoiced before smoothing
-    // (protected by the voiced check at start of loop)
+  // Pass 2b — per-frame octave/fifth/fourth correction
+  const RADIUS = 18;
+  for (let i = RADIUS; i < frames.length - RADIUS; i++) {
+    if (!frames[i].voiced) continue;
+    const nb = [];
+    for (let k = i - RADIUS; k <= i + RADIUS; k++) if (k !== i && frames[k].voiced) nb.push(frames[k].midi);
+    if (nb.length < 10) continue;
+    nb.sort((a,b) => a-b);
+    const med = nb[Math.floor(nb.length/2)];
+    const diff = frames[i].midi - med;
+    const traps = [12,-12,7,-7,5,-5,19,-19,24,-24];
+    let fixed = false;
+    for (const t of traps) { if (Math.abs(diff-t) < 1.4) { frames[i].midi -= t; frames[i].freq = midi2f(frames[i].midi); fixed = true; break; } }
+    if (!fixed && Math.abs(diff) > 3.5) frames[i].voiced = false;
   }
 
-  // Pass 2b: octave outlier removal.
-  // A frame whose pitch is 7+ semitones from BOTH its nearest voiced neighbours
-  // is almost certainly an octave detection error. Mark it unvoiced so it cannot
-  // seed a spurious segment. OCT_LOOK=3 frames (~35ms) avoids killing rapid legato jumps.
-  const OCT_GUARD=7.0;
-  const OCT_LOOK=3;
-  for(let i=OCT_LOOK;i<frames.length-OCT_LOOK;i++){
-    if(!frames[i].voiced) continue;
-    let leftMidi=null,rightMidi=null;
-    for(let k=i-1;k>=Math.max(0,i-OCT_LOOK);k--){if(frames[k].voiced){leftMidi=frames[k].midi;break;}}
-    for(let k=i+1;k<=Math.min(frames.length-1,i+OCT_LOOK);k++){if(frames[k].voiced){rightMidi=frames[k].midi;break;}}
-    const leftFar =leftMidi ===null||Math.abs(frames[i].midi-leftMidi) >=OCT_GUARD;
-    const rightFar=rightMidi===null||Math.abs(frames[i].midi-rightMidi)>=OCT_GUARD;
-    if(leftFar&&rightFar) frames[i].voiced=false;
+  // Pass 3 — segmentation
+  notes = [];
+  const HOP_MS  = (HOP / sr) * 1000;
+  const MIN_MS  = 120, GAP_MS = 60;
+  const MIN_FR  = Math.ceil(MIN_MS / HOP_MS);
+  const GAP_FR  = Math.ceil(GAP_MS  / HOP_MS);
+  let i = 0;
+
+  while (i < frames.length) {
+    if (!frames[i].voiced) { i++; continue; }
+    let start = i, end = i;
+    const roll = [frames[i].midi];
+
+    for (let j = i + 1; j < frames.length; j++) {
+      if (!frames[j].voiced) {
+        let gap = 0;
+        for (let g = j; g < frames.length && !frames[g].voiced; g++) gap++;
+        if (gap >= GAP_FR) break;
+        j += gap - 1; continue;
+      }
+      roll.push(frames[j].midi);
+      if (roll.length > 20) roll.shift();
+      const sorted = [...roll].sort((a,b) => a-b);
+      const center = sorted[Math.floor(sorted.length/2)];
+      if (Math.abs(frames[j].midi - center) > 0.8) {
+        let stay = 0;
+        for (let k = j; k < Math.min(j+10, frames.length); k++)
+          if (frames[k].voiced && Math.abs(frames[k].midi - frames[j].midi) < 0.5) stay++;
+        if (stay >= 6) break;
+      }
+      end = j;
+    }
+
+    const seg = [];
+    for (let k = start; k <= end; k++) if (frames[k].voiced) seg.push(frames[k]);
+
+    if (seg.length >= MIN_FR) {
+      const subs = splitOnRmsDips(seg, HOP_MS);
+      for (const sub of subs) {
+        if (sub.length < MIN_FR) continue;
+        const mids = sub.map(f => f.midi).sort((a,b) => a-b);
+        const med  = mids[Math.floor(mids.length/2)];
+        const avgF = sub.reduce((s,f) => s+f.freq, 0) / sub.length;
+        const snp  = snapMidi(med);
+        notes.push({
+          startSample: sub[0].samplePos,
+          endSample:   Math.min(sub[sub.length-1].samplePos + WIN, buf.length),
+          startTime:   sub[0].t,
+          endTime:     sub[sub.length-1].t + WIN/sr,
+          freq: avgF, midi: med, midiOrig: med,
+          tuneOffset: 0,
+          cents: Math.round((med - snp) * 100),
+          selected: false, vibratoReduction: 0,
+          originalStartSample: sub[0].samplePos,
+          preventMerge: subs.length > 1,
+          pitchSegments: sub.map(f => ({ t: f.samplePos + WIN/2, midi: f.midi }))
+        });
+      }
+      i = end + 1;
+    } else { i++; }
   }
 
-  // Pass 3: snap each frame to nearest semitone
-  frames.forEach(f=>{ if(f.voiced) f.semitone=Math.round(f.midi); });
-
-  // Pass 4: segment using sensitivity params
-  const SP=getSensParams();
-  notes=[];
-  const MIN_FRAMES=Math.ceil(SP.minMs/(HOP/sr*1000));
-  let i=0;
-
-  while(i<frames.length){
-    if(!frames[i].voiced){i++;continue;}
-
-    const seedVals=[];
-    // Look a few frames in (3-frame offset ≈ ~35ms at 44.1kHz/HOP512) so the seed
-    // reflects the STABLE pitch of the new note, not the tail end of a glide/portamento
-    // from the previous note. Keeps ascending intervals like C→D from seeding at C#.
-    const seedStart=Math.min(i+3,frames.length-1);
-    for(let k=seedStart;k<Math.min(seedStart+20,frames.length)&&seedVals.length<10;k++){
-      if(frames[k].voiced) seedVals.push(frames[k].midi);
+  // Pass 4 — conservative merge (gap < 20ms, same pitch, not both robust)
+  if (notes.length > 1) {
+    const merged = []; let cur = { ...notes[0] };
+    for (let n = 1; n < notes.length; n++) {
+      const nx = notes[n];
+      const gap = nx.startTime - cur.endTime;
+      const dp  = Math.abs(cur.midi - nx.midi);
+      const bothRobust = (cur.endTime-cur.startTime > 0.11) && (nx.endTime-nx.startTime > 0.11);
+      if (gap < 0.020 && dp < 0.5 && !cur.preventMerge && !nx.preventMerge && !bothRobust) {
+        cur.endTime = nx.endTime; cur.endSample = nx.endSample;
+        const cd = cur.endTime-cur.startTime, nd = nx.endTime-nx.startTime;
+        cur.midi = (cur.midi*cd + nx.midi*nd)/(cd+nd); cur.midiOrig = cur.midi;
+      } else { merged.push(cur); cur = { ...nx }; }
     }
-    // Fallback: if nothing there, fall back to frames from position i
-    if(seedVals.length<3){
-      for(let k=i;k<Math.min(i+16,frames.length)&&seedVals.length<8;k++){
-        if(frames[k].voiced) seedVals.push(frames[k].midi);
-      }
-    }
-    seedVals.sort((a,b)=>a-b);
-    const seedMidi=seedVals[Math.floor(seedVals.length/2)];
-
-    let end=i, freqSum=frames[i].freq, count=1;
-    const SAME_NOTE=SP.sameNote;
-    const rollingMidis=[];
-    for(let k=i;k<Math.min(i+8,frames.length);k++){
-      if(frames[k].voiced) rollingMidis.push(frames[k].midi);
-    }
-
-    for(let j=i+1;j<frames.length;j++){
-      // Onset detection: use pre-computed onset flags (Pass 1.5).
-      // onset[j] = true if spectral flux spike + RMS dip → new repeated note.
-      if(frames[j].voiced && frames[j].onset && j-i>8){
-        const pitchDiff=Math.abs(frames[j].midi-seedMidi);
-        if(pitchDiff<=2.5) break; // same pitch onset = split here
-      }
-      if(!frames[j].voiced){
-        // Count unvoiced frames
-        let gap=0;
-        for(let g=j;g<frames.length;g++){
-          if(!frames[g].voiced) gap++; else break;
-        }
-        // Any gap >= gapBridge = end of note
-        if(gap>=SP.gapBridge) break;
-        // Short gap: check pitch after gap.
-        // Skip octave-error frames (>6st from seedMidi), find first stable frame.
-        // If same note (within sameNote+0.5st) → breath between repeated notes → split.
-        // If different note → legato → bridge.
-        if(gap>=1){
-          let splitGap=false;
-          for(let k=j+gap;k<Math.min(frames.length,j+gap+5);k++){
-            if(!frames[k].voiced) continue;
-            const diff=Math.abs(frames[k].midi-seedMidi);
-            if(diff>6) continue; // skip octave error frame
-            if(diff<=SP.sameNote+0.5) splitGap=true;
-            break;
-          }
-          if(splitGap) break;
-        }
-        j+=gap-1; continue;
-      }
-
-      // dynamic center = median of last 12 voiced frames
-      rollingMidis.push(frames[j].midi);
-      if(rollingMidis.length>12) rollingMidis.shift();
-      const sorted=[...rollingMidis].sort((a,b)=>a-b);
-      const dynamicCenter=sorted[Math.floor(sorted.length/2)];
-      const diff=Math.abs(frames[j].midi-dynamicCenter);
-
-      if(diff<=SAME_NOTE){
-        end=j; freqSum+=frames[j].freq; count++;
-      } else {
-        // Pitch departed from center — is it vibrato (oscillates back) or a new note (stays away)?
-        // DIRECTIONAL: track whether the move is UP or DOWN relative to center.
-        // Only frames that stay in the SAME DIRECTION count as confirmation.
-        // This prevents vibrato (which oscillates both ways) from triggering splits,
-        // AND it lets adjacent notes split correctly whether the melody goes up or down.
-        const newMidi=frames[j].midi;
-        const jumpSize=diff;
-        const direction=Math.sign(newMidi-dynamicCenter); // +1 = up, -1 = down
-        const needed=jumpSize<1.5?SP.confirmSm:jumpSize<2.5?SP.confirmMd:SP.confirmLg;
-        const lookAhead=needed+4;
-        let stayCount=0, returnCount=0, wrongDirCount=0, totalVoiced=0;
-        for(let k=j;k<Math.min(j+lookAhead,frames.length);k++){
-          if(!frames[k].voiced) continue;
-          totalVoiced++;
-          const kDiff=frames[k].midi-dynamicCenter;
-          const kDir=Math.sign(kDiff);
-          // Within tolerance of the new pitch AND still on the same side of center?
-          if(Math.abs(frames[k].midi-newMidi)<=SAME_NOTE && kDir===direction){
-            stayCount++;
-          } else if(Math.abs(kDiff)<=SAME_NOTE){
-            returnCount++;               // oscillated back to center → vibrato-like
-          } else if(kDir!==0 && kDir!==direction){
-            wrongDirCount++;             // crossed to the opposite side → definitely vibrato, not a new note
-          }
-        }
-        // Split if: enough frames stay on the new pitch IN THE SAME DIRECTION,
-        // AND the move isn't dominated by returns-to-center or opposite-side excursions.
-        const stayRatio=totalVoiced>0?stayCount/totalVoiced:0;
-        const oscillating=(returnCount+wrongDirCount)>=stayCount; // looks like vibrato
-        if(stayCount>=needed && stayRatio>0.5 && !oscillating) break;
-      }
-    }
-
-    if(end-i+1>=MIN_FRAMES){
-      // Compute final pitch from the STABLE body of the note, not the attack transition.
-      // Skip the first ~30ms (attack/portamento) and use the median of semitone values.
-      // Median-based MIDI is robust to both vibrato and lead-in glide, so an ascending
-      // C→D no longer gets dragged to C# by the transitional frames.
-      const segLen=end-i+1;
-      const skip=Math.min(Math.floor(segLen*0.15), Math.ceil(30/(HOP/sr*1000)));
-      const bodyStart=i+skip;
-      const midiVals=[];
-      const freqVals=[];
-      for(let k=bodyStart;k<=end;k++){
-        if(frames[k].voiced){
-          midiVals.push(frames[k].midi);
-          freqVals.push(frames[k].freq);
-        }
-      }
-      // Fallback if skip left too little
-      if(midiVals.length<3){
-        for(let k=i;k<=end;k++){
-          if(frames[k].voiced){ midiVals.push(frames[k].midi); freqVals.push(frames[k].freq); }
-        }
-      }
-      midiVals.sort((a,b)=>a-b);
-      const midi=midiVals[Math.floor(midiVals.length/2)];
-      // avgFreq still reported for display, but snap is driven by the robust MIDI median
-      const avgFreq=freqVals.reduce((s,v)=>s+v,0)/freqVals.length;
-      const snapped=snapMidi(midi);
-      notes.push({
-        startSample:frames[i].samplePos,
-        endSample:Math.min(frames[end].samplePos+WIN,buf.length),
-        startTime:frames[i].t,
-        endTime:frames[end].t+WIN/sr,
-        freq:avgFreq, midi, midiOrig:midi,
-        tuneOffset:0,
-        cents:Math.round((midi-snapped)*100),
-        selected:false, vibratoReduction:0,
-        originalStartSample:frames[i].samplePos  // never changes — used by Reset All
-      });
-      i=end+1;
-    } else {
-      i++;
-    }
+    merged.push(cur); notes = merged;
   }
 
-  // DEBUG: log all segments found after Pass 4
-  // Pass 5: merge blobs of same note (fragments of ONE note only — not adjacent scale notes)
-  // Stricter than before: only merge if the two fragments clearly belong to the same pitch.
-  // Two fragments on adjacent semitones (e.g. E3 + F3) must NOT merge.
-  // Run twice to catch chains of fragments.
-  for(let pass=0;pass<2;pass++){
-    if(notes.length>1){
-      const merged=[];
-      let cur={...notes[0]};
-      for(let n=1;n<notes.length;n++){
-        const next=notes[n];
-        const gap=next.startTime-cur.endTime;
-        const semDiff=Math.abs(cur.midi-next.midi);
-        const sameSnap=snapMidi(cur.midi)===snapMidi(next.midi); // both round to same semitone
-        // Merge only if:
-        //  - small gap, AND
-        //  - pitch difference is well under a semitone (≤ 0.6), AND
-        //  - both fragments snap to the same target note.
-        // This keeps fragments of ONE note together but separates E3 from F3.
-        if(gap<0.05 && semDiff<=0.6 && sameSnap){ // 50ms max — only detection glitches
-          cur.endTime=next.endTime; cur.endSample=next.endSample;
-          const avg=(cur.freq+next.freq)/2;
-          cur.freq=avg; cur.midi=f2midi(avg); cur.midiOrig=cur.midi;
-          cur.cents=Math.round((cur.midi-snapMidi(cur.midi))*100);
-        } else { merged.push(cur); cur={...next}; }
-      }
-      merged.push(cur);
-      notes=merged;
-    }
-  }
-
-  // Pass 6: octave continuity — fix whole-segment octave errors.
-  // Uses a global median anchor in addition to local neighbours.
-  // This handles the case where several consecutive notes are all one octave too high —
-  // local-only context fails because the neighbours are also wrong; the global median
-  // (computed once before any corrections) gives a stable reference pitch for the song.
-  // Run 4 passes to catch chains.
+  // Pass 5 — octave continuity with global median anchor
   {
-    // Compute global median once (before any corrections touch the array).
-    const allMidis=[...notes].map(n=>n.midi).sort((a,b)=>a-b);
-    const globalMedian=allMidis.length>0?allMidis[Math.floor(allMidis.length/2)]:60;
-
-    for(let pass=0;pass<4;pass++){
-      for(let n=0;n<notes.length;n++){
-        const prev2=n>1?notes[n-2]:null;
-        const prev=n>0?notes[n-1]:null;
-        const next=n<notes.length-1?notes[n+1]:null;
-        const next2=n<notes.length-2?notes[n+2]:null;
-        const midi=notes[n].midi;
-
-        // Build local context — immediate neighbours weighted double
-        const ctxMidis=[];
-        if(prev)  ctxMidis.push(prev.midi, prev.midi);
-        if(next)  ctxMidis.push(next.midi, next.midi);
-        if(prev2) ctxMidis.push(prev2.midi);
-        if(next2) ctxMidis.push(next2.midi);
-
-        // Also include global median as a weak anchor (single weight)
-        // so isolated runs of wrong-octave notes still get corrected.
-        ctxMidis.push(globalMedian);
-
-        ctxMidis.sort((a,b)=>a-b);
-        const ctx=ctxMidis[Math.floor(ctxMidis.length/2)];
-        const dist=Math.abs(midi-ctx);
-
-        // Act on jumps of 5–17 semitones (covers both 8va and 8vb errors with tolerance)
-        if(dist>=5&&dist<=17){
-          const downDist=Math.abs((midi-12)-ctx);
-          const upDist  =Math.abs((midi+12)-ctx);
-          if(downDist<dist&&downDist<upDist){
-            notes[n].midi    -=12; notes[n].midiOrig-=12;
-            notes[n].freq     =midi2f(notes[n].midi);
-            notes[n].cents    =Math.round((notes[n].midi-snapMidi(notes[n].midi))*100);
-          } else if(upDist<dist){
-            notes[n].midi    +=12; notes[n].midiOrig+=12;
-            notes[n].freq     =midi2f(notes[n].midi);
-            notes[n].cents    =Math.round((notes[n].midi-snapMidi(notes[n].midi))*100);
-          }
+    const allM = [...notes].map(n=>n.midi).sort((a,b)=>a-b);
+    const gMed = allM.length ? allM[Math.floor(allM.length/2)] : 60;
+    for (let pass = 0; pass < 4; pass++) {
+      for (let n = 0; n < notes.length; n++) {
+        const ctx = [];
+        if (n>1)              ctx.push(notes[n-2].midi);
+        if (n>0)              ctx.push(notes[n-1].midi, notes[n-1].midi);
+        if (n<notes.length-1) ctx.push(notes[n+1].midi, notes[n+1].midi);
+        if (n<notes.length-2) ctx.push(notes[n+2].midi);
+        ctx.push(gMed);
+        ctx.sort((a,b)=>a-b);
+        const med = ctx[Math.floor(ctx.length/2)];
+        const d = Math.abs(notes[n].midi - med);
+        if (d >= 5 && d <= 17) {
+          const dD = Math.abs((notes[n].midi-12)-med);
+          const dU = Math.abs((notes[n].midi+12)-med);
+          if (dD < d && dD < dU) { notes[n].midi -= 12; notes[n].midiOrig -= 12; notes[n].freq = midi2f(notes[n].midi); notes[n].cents = Math.round((notes[n].midi-snapMidi(notes[n].midi))*100); }
+          else if (dU < d)       { notes[n].midi += 12; notes[n].midiOrig += 12; notes[n].freq = midi2f(notes[n].midi); notes[n].cents = Math.round((notes[n].midi-snapMidi(notes[n].midi))*100); }
         }
       }
     }
   }
-} // end analyzeBuffer
+  // Clip each note's visual end to the next note's start (prevents overlap on display)
+  for (let n = 0; n < notes.length; n++) {
+    const nx = notes[n+1];
+    notes[n].displayEnd = nx ? Math.min(notes[n].endTime, nx.startTime - 0.002) : notes[n].endTime;
+  }
+}
 
 // ══ EDITOR CANVAS ════════════════════════════════════════════
 const edScroll=document.getElementById('ed-scroll');
@@ -1196,13 +1021,11 @@ function noteColor(n){
 }
 
 function drawBlob(n){
-  // Invariant: n.midi = n.midiOrig + n.tuneOffset. It IS the effective displayed pitch.
-  const effectiveMidi=n.midi;
-  // blob spans 2 semitone rows tall, centered on pitch
-  const BLOB_H=ROW_H*1.8;
+  // Snap display to nearest semitone row so notes never visually overlap
+  const effectiveMidi=Math.round(n.midi);
+  const BLOB_H=ROW_H*0.88;
   const x=timeToX(n.startTime)+1;
-  const w=Math.max(12,timeToX(n.endTime)-x-3);
-  // center the blob vertically on the effective midi row
+  const w=Math.max(12,timeToX(n.displayEnd||n.endTime)-x-3);
   const centerY=midiToY(effectiveMidi)+ROW_H/2;
   const y=centerY-BLOB_H/2;
   const{base,fill,stroke}=noteColor(n);
@@ -1760,13 +1583,13 @@ function refreshSelectionPanel(){
 }
 
 function hitTest(x,y){
-  const BLOB_H=ROW_H*1.8;
+  const BLOB_H=ROW_H*0.88;
   const PAD=10;
   for(let i=notes.length-1;i>=0;i--){
     const n=notes[i];
     const em=n.midi+n.tuneOffset;
     const nx=timeToX(n.startTime);
-    const nw=Math.max(20,timeToX(n.endTime)-nx);
+    const nw=Math.max(20,timeToX(n.displayEnd||n.endTime)-nx);
     const cy=midiToY(em)+ROW_H/2;
     const ny=cy-BLOB_H/2;
     if(x>=nx-PAD&&x<=nx+nw+PAD&&y>=ny-PAD&&y<=ny+BLOB_H+PAD) return n;
@@ -1824,7 +1647,7 @@ window.addEventListener('mouseup',(e)=>{
   const ry1=Math.max(dragSelStartY,dragSelCurY);
   const dragged=Math.abs(rx1-rx0)>6||Math.abs(ry1-ry0)>6;
   if(dragged){
-    const BLOB_H=ROW_H*1.8;
+    const BLOB_H=ROW_H*0.88;
     notes.forEach(n=>{
       const nx0=timeToX(n.startTime);
       const nx1=Math.max(nx0+12,timeToX(n.endTime));
@@ -1876,7 +1699,7 @@ edCanvas.addEventListener('touchend',(e)=>{
   const rx1=Math.max(dragSelStartX,dragSelCurX);
   const ry0=Math.min(dragSelStartY,dragSelCurY);
   const ry1=Math.max(dragSelStartY,dragSelCurY);
-  const BLOB_H=ROW_H*1.8;
+  const BLOB_H=ROW_H*0.88;
   notes.forEach(n=>{
     const em=n.midi;
     const nx0=timeToX(n.startTime);
@@ -2253,6 +2076,11 @@ document.getElementById('apply-btn').onclick=()=>{
 // ══ BUFFER CORRECTION ════════════════════════════════════════
 function rebuildCorrectedBuffer(){
   if(!originalBuffer)return;
+  // Recalculate displayEnd after any edit (split/merge/undo)
+  for(let n=0;n<notes.length;n++){
+    const nx=notes[n+1];
+    notes[n].displayEnd=nx?Math.min(notes[n].endTime,nx.startTime-0.002):notes[n].endTime;
+  }
   correctedBuffer=cloneBuffer(originalBuffer);
   const sr=originalBuffer.sampleRate;
   const FADE=Math.floor(sr*0.020); // 20ms crossfade (was 8ms)
