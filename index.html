@@ -247,7 +247,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
         <button class="np-snap-btn" id="np-snap">snap</button>
         <button class="np-snap-btn" id="np-merge" title="Merge with next note">merge→</button>
         <button class="np-snap-btn" id="np-split" title="Split note in half">split</button>
-        <button class="np-snap-btn" id="np-monitor" title="Monitor: loop this note while editing" style="background:transparent">▶ monitor</button>
         <button class="np-close" id="np-close">✕</button>
       </div>
       <div class="np-row">
@@ -576,9 +575,9 @@ async function loadAudioFromUrl(urlOrBuffer,name){
     updateMidiRange();
     // Auto-fit vertical zoom so the note range fills ~70% of screen height
     const wrap=document.querySelector('.editor-wrap');
-    const availH=(wrap?wrap.clientHeight:500)*1.0;
+    const availH=(wrap?wrap.clientHeight:500)*1.15;
     const targetRowH=Math.floor(availH/Math.max(MIDI_RANGE,8));
-    ROW_H=Math.max(18,Math.min(44,targetRowH));
+    ROW_H=Math.max(22,Math.min(54,targetRowH));
     initEditorCanvas();
     drawEditor();
     updateMinimap();
@@ -1034,7 +1033,7 @@ function noteColor(n){
 }
 
 function drawBlob(n){
-  // Snap display to nearest semitone row so notes never visually overlap
+  // Snap display to nearest semitone row — n.midi already includes tuneOffset
   const effectiveMidi=Math.round(n.midi);
   const BLOB_H=ROW_H*0.88;
   const x=timeToX(n.startTime)+1;
@@ -1113,32 +1112,54 @@ function drawBlob(n){
     ec.fillText((totalCents>0?'+':'')+totalCents+'¢',x+4,y+BLOB_H-3);
   }
 
-  // ── pitch curve (shows vibrato / pitch variation over time) ──
-  if(w>40&&n.pitchSegments&&n.pitchSegments.length>=3){
+  // ── pitch curve (vibrato / pitch variation) ──
+  if(w>44&&n.pitchSegments&&n.pitchSegments.length>=3){
     const segs=n.pitchSegments;
-    const medM=segs.map(s=>s.midi).sort((a,b)=>a-b);
+    const medM=[...segs.map(s=>s.midi)].sort((a,b)=>a-b);
     const med=medM[Math.floor(medM.length/2)];
-    const RANGE=2.0; // ±2 semitones maps to full height
-    const curveY=centerY;
-    const curveH=(BLOB_H*0.38);
+    const RANGE=1.2; // ±1.2 semitones = full height — tighter = more dramatic
+    const graphTop=y+11;
+    const graphBot=y+BLOB_H-3;
+    const graphH=graphBot-graphTop;
+    const graphMid=graphTop+graphH/2;
     const tStart=segs[0].t/originalBuffer.sampleRate;
     const tEnd=segs[segs.length-1].t/originalBuffer.sampleRate;
     const tSpan=Math.max(0.001,tEnd-tStart);
+
+    const segX=s=>Math.max(x+2,Math.min(x+w-2, x+(s.t/originalBuffer.sampleRate-tStart)/tSpan*w));
+    const segY=s=>Math.max(graphTop,Math.min(graphBot, graphMid-((s.midi-med)/RANGE)*(graphH/2)));
+
     ec.save();
+    ec.beginPath(); ec.rect(x+2,graphTop-1,w-4,graphH+2); ec.clip();
+
+    // center line
+    ec.strokeStyle='rgba(255,255,255,0.20)';
+    ec.lineWidth=1;
+    ec.setLineDash([3,3]);
+    ec.beginPath(); ec.moveTo(x+2,graphMid); ec.lineTo(x+w-2,graphMid); ec.stroke();
+    ec.setLineDash([]);
+
+    // filled area
     ec.beginPath();
-    ec.rect(x+2,y+2,w-4,BLOB_H-4);
-    ec.clip();
-    ec.strokeStyle=`rgba(${hexToRgb(base)},0.65)`;
-    ec.lineWidth=1.2;
-    ec.lineJoin='round';
+    ec.moveTo(segX(segs[0]),graphMid);
+    for(let s=0;s<segs.length;s++) ec.lineTo(segX(segs[s]),segY(segs[s]));
+    ec.lineTo(segX(segs[segs.length-1]),graphMid);
+    ec.closePath();
+    ec.fillStyle=n.selected?'rgba(0,255,180,0.30)':'rgba(255,255,255,0.18)';
+    ec.fill();
+
+    // curve line — thick and bright
     ec.beginPath();
     for(let s=0;s<segs.length;s++){
-      const t=segs[s].t/originalBuffer.sampleRate;
-      const cx=x+(t-tStart)/tSpan*w;
-      const cy=curveY-((segs[s].midi-med)/RANGE)*curveH;
-      if(s===0) ec.moveTo(cx,cy); else ec.lineTo(cx,cy);
+      if(s===0) ec.moveTo(segX(segs[s]),segY(segs[s]));
+      else ec.lineTo(segX(segs[s]),segY(segs[s]));
     }
+    ec.strokeStyle=n.selected?'rgba(0,255,180,1.0)':'rgba(255,255,255,0.85)';
+    ec.lineWidth=2.0;
+    ec.lineJoin='round';
+    ec.lineCap='round';
     ec.stroke();
+
     ec.restore();
   }
 
@@ -1410,9 +1431,8 @@ function touchMidpoint(t1,t2,rect){
 
 edCanvas.addEventListener('touchstart',(e)=>{
   if(e.touches.length>=2){
-    // Begin pinch — cancel any tap in progress
     pinchActive=true;
-    tapMoved=true;// prevent tap on touchend
+    tapMoved=true;
     const t1=e.touches[0],t2=e.touches[1];
     pinchStartDistX=Math.abs(t1.clientX-t2.clientX);
     pinchStartDistY=Math.abs(t1.clientY-t2.clientY);
@@ -1426,7 +1446,22 @@ edCanvas.addEventListener('touchstart',(e)=>{
   }
   const t=e.touches[0];
   tapStartX=t.clientX;tapStartY=t.clientY;tapStartTime=Date.now();tapMoved=false;
+  // If touching a selected note — prepare for vertical pitch drag
+  const{x,y}=getCanvasXY(t.clientX,t.clientY);
+  const hit=hitTest(x,y);
+  if(hit&&hit.selected){
+    _mobilePitchNote=hit;
+    _mobilePitchStartY=t.clientY;
+    _mobilePitchStartOffset=hit.tuneOffset;
+    _mobilePitchActive=false;
+  } else {
+    _mobilePitchNote=null;
+  }
 },{passive:true});
+
+let _mobilePitchNote=null,_mobilePitchStartY=0,_mobilePitchStartOffset=0,_mobilePitchActive=false;
+let _pitchThrottle=0;
+let _vertDragNote=null,_vertDragStartY=0,_vertDragStartOffset=0,_vertDragMoved=false;
 
 edCanvas.addEventListener('touchmove',(e)=>{
   if(pinchActive&&e.touches.length>=2){
@@ -1434,12 +1469,9 @@ edCanvas.addEventListener('touchmove',(e)=>{
     const t1=e.touches[0],t2=e.touches[1];
     const curDistX=Math.abs(t1.clientX-t2.clientX);
     const curDistY=Math.abs(t1.clientY-t2.clientY);
-    // Per-axis ratio — allows asymmetric pinch (more horizontal vs vertical)
-    // Fall back to total distance if one axis is near zero (fingers vertical/horizontal)
     const totalRatio=pinchStartDist>0?Math.hypot(t1.clientX-t2.clientX,t1.clientY-t2.clientY)/pinchStartDist:1;
     const rX=pinchStartDistX>8?curDistX/pinchStartDistX:totalRatio;
     const rY=pinchStartDistY>8?curDistY/pinchStartDistY:totalRatio;
-    // Compute target absolute values (not cumulative) for stable pinch
     const targetPxSec=Math.max(ZOOM_X_MIN,Math.min(ZOOM_X_MAX,pinchStartPxSec*rX));
     const targetRowH=Math.max(ZOOM_Y_MIN,Math.min(ZOOM_Y_MAX,pinchStartRowH*rY));
     const scaleX=targetPxSec/PX_PER_SEC;
@@ -1449,10 +1481,43 @@ edCanvas.addEventListener('touchmove',(e)=>{
   }
   const t=e.touches[0];
   if(!t)return;
+  // Mobile pitch drag: vertical swipe on selected note
+  if(_mobilePitchNote){
+    const dy=t.clientY-_mobilePitchStartY;
+    if(!_mobilePitchActive&&Math.abs(dy)>6){
+      _mobilePitchActive=true;
+      tapMoved=true;
+    }
+    if(_mobilePitchActive){
+      e.preventDefault();
+      // ROW_H px = 1 semitone = 100 cents
+      const centsDelta=-Math.round(dy/(ROW_H/100));
+      const newOffset=Math.max(-400,Math.min(400,_mobilePitchStartOffset+centsDelta/100));
+      _mobilePitchNote.tuneOffset=newOffset;
+      updateNoteCents(_mobilePitchNote);
+      updateNotePanel(_mobilePitchNote);
+      drawEditor();
+      const now=Date.now();
+      if(now-_pitchThrottle>200){
+        _pitchThrottle=now;
+        _previewNote(_mobilePitchNote);
+      }
+      return;
+    }
+  }
   if(Math.abs(t.clientX-tapStartX)>12||Math.abs(t.clientY-tapStartY)>12)tapMoved=true;
 },{passive:false});
 
 edCanvas.addEventListener('touchend',(e)=>{
+  if(_mobilePitchActive&&_mobilePitchNote){
+    _mobilePitchActive=false;
+    rebuildCorrectedBuffer();
+    playNote(_mobilePitchNote);
+    pushUndo();refreshNoteList();
+    _mobilePitchNote=null;
+    return;
+  }
+  _mobilePitchNote=null;
   if(pinchActive){
     if(e.touches.length<2){pinchActive=false;tapMoved=true;}
     return;
@@ -1476,7 +1541,54 @@ edCanvas.addEventListener('touchend',(e)=>{
   handleTap(x,y,isDouble,false);
 },{passive:false});
 
-// ── Desktop wheel zoom: Ctrl+wheel = horizontal, Ctrl+Shift+wheel = vertical ──
+// ── Desktop double-click = split note at cursor position ──
+let lastTouchEndTime=0;
+edCanvas.addEventListener('dblclick',(e)=>{
+  e.preventDefault();
+  if(Date.now()-lastTouchEndTime<500)return;
+  const rect=edCanvas.getBoundingClientRect();
+  const x=(e.clientX-rect.left)+edScroll.scrollLeft;
+  const y=(e.clientY-rect.top)+edScroll.scrollTop;
+  const hit=hitTest(x,y);
+  if(!hit)return;
+  const splitTime=xToTime(x);
+  const minDur=0.06;
+  if(splitTime<=hit.startTime+minDur||splitTime>=hit.endTime-minDur)return;
+  pushUndo();
+  const splitSample=Math.round(splitTime*originalBuffer.sampleRate);
+  // Recalculate pitch for each half from stored pitchSegments
+  const firstSegs=(hit.pitchSegments||[]).filter(s=>s.t/originalBuffer.sampleRate<splitTime);
+  const secondSegs=(hit.pitchSegments||[]).filter(s=>s.t/originalBuffer.sampleRate>=splitTime);
+  const segMidi=(segs)=>{
+    if(!segs.length) return hit.midi;
+    const m=segs.map(s=>s.midi).sort((a,b)=>a-b);
+    return m[Math.floor(m.length/2)];
+  };
+  const first={...hit,endSample:splitSample,endTime:splitTime,
+    midi:segMidi(firstSegs)+hit.tuneOffset,
+    midiOrig:segMidi(firstSegs),
+    pitchSegments:firstSegs.length?firstSegs:hit.pitchSegments,
+    selected:true,preventMerge:true};
+  const second={...hit,startSample:splitSample,startTime:splitTime,
+    originalStartSample:splitSample,
+    midi:segMidi(secondSegs)+hit.tuneOffset,
+    midiOrig:segMidi(secondSegs),
+    pitchSegments:secondSegs.length?secondSegs:hit.pitchSegments,
+    selected:false,preventMerge:true};
+  first.cents=Math.round((first.midi-snapMidi(first.midi))*100);
+  second.cents=Math.round((second.midi-snapMidi(second.midi))*100);
+  const idx=notes.indexOf(hit);
+  notes.splice(idx,1,first,second);
+  // Recalculate displayEnd immediately so notes don't visually overlap before rebuild
+  for(let n=0;n<notes.length;n++){
+    const nx=notes[n+1];
+    notes[n].displayEnd=nx?Math.min(notes[n].endTime,nx.startTime-0.002):notes[n].endTime;
+  }
+  selectedNote=first;
+  rebuildCorrectedBuffer();
+  refreshSelectionPanel();
+  drawEditor();
+});
 edScroll.addEventListener('wheel',(e)=>{
   if(!e.ctrlKey&&!e.metaKey)return;// normal scroll otherwise
   e.preventDefault();
@@ -1524,7 +1636,6 @@ document.addEventListener('keydown',(e)=>{
 
 
 // desktop mouse only — ignored if touch already handled
-let lastTouchEndTime=0;
 edCanvas.addEventListener('touchend',()=>{lastTouchEndTime=Date.now();},{passive:true});
 edCanvas.addEventListener('click',(e)=>{
   if(Date.now()-lastTouchEndTime<500)return;
@@ -1554,7 +1665,7 @@ function handleTap(x,y,isDouble,shiftKey){
       const splitTime=xToTime(x);
       const minDur=0.08; // minimum 80ms per half
       if(splitTime>hit.startTime+minDur && splitTime<hit.endTime-minDur){
-        saveUndo();
+        pushUndo();
         const splitSample=Math.round(splitTime*originalBuffer.sampleRate);
         const first={...hit, endSample:splitSample, endTime:splitTime};
         const second={...hit, startSample:splitSample, startTime:splitTime,
@@ -1562,6 +1673,8 @@ function handleTap(x,y,isDouble,shiftKey){
         first.selected=true;
         const idx=notes.indexOf(hit);
         notes.splice(idx,1,first,second);
+  // Recalculate displayEnd immediately to prevent visual overlap
+  for(let _n=0;_n<notes.length;_n++){const _nx=notes[_n+1];notes[_n].displayEnd=_nx?Math.min(notes[_n].endTime,_nx.startTime-0.002):notes[_n].endTime;}
         selectedNote=first;
         refreshSelectionPanel();
         drawEditor();
@@ -1626,10 +1739,10 @@ function refreshSelectionPanel(){
 
 function hitTest(x,y){
   const BLOB_H=ROW_H*0.88;
-  const PAD=10;
+  const PAD=6;
   for(let i=notes.length-1;i>=0;i--){
     const n=notes[i];
-    const em=n.midi+n.tuneOffset;
+    const em=Math.round(n.midi); // n.midi already = midiOrig + tuneOffset
     const nx=timeToX(n.startTime);
     const nw=Math.max(20,timeToX(n.displayEnd||n.endTime)-nx);
     const cy=midiToY(em)+ROW_H/2;
@@ -1645,9 +1758,19 @@ edCanvas.addEventListener('mousedown',(e)=>{
   if(Date.now()-lastTouchEndTime<500)return;
   if(e.button!==0)return;
   const{x,y}=getCanvasXY(e.clientX,e.clientY);
-  if(hitTest(x,y)){
-    // Reset drag origin so click suppression won't fire after a note tap
+  const hit=hitTest(x,y);
+  if(hit){
+    // Start vertical pitch drag on this note
+    _vertDragNote=hit;
+    _vertDragStartY=e.clientY;
+    _vertDragStartOffset=hit.tuneOffset;
+    _vertDragMoved=false;
     dragSelStartClientX=e.clientX;dragSelStartClientY=e.clientY;
+    // Select note on mousedown
+    if(!e.shiftKey){notes.forEach(n=>n.selected=false);}
+    hit.selected=true; selectedNote=hit;
+    refreshSelectionPanel(); drawEditor();
+    e.preventDefault();
     return;
   }
   rbMouseActive=true;
@@ -1669,17 +1792,35 @@ edScroll.addEventListener('wheel',(e)=>{
 },{passive:false,capture:true});
 
 window.addEventListener('mousemove',(e)=>{
+  // ── Vertical pitch drag ──
+  if(_vertDragNote){
+    const dy=e.clientY-_vertDragStartY;
+    if(Math.abs(dy)>3) _vertDragMoved=true;
+    if(_vertDragMoved){
+      // ROW_H pixels = 1 semitone
+      const semDelta=-(dy/ROW_H);
+      const newOffset=Math.max(-4,Math.min(4,_vertDragStartOffset+semDelta));
+      _vertDragNote.tuneOffset=newOffset;
+      _vertDragNote.midi=_vertDragNote.midiOrig+newOffset;
+      updateNoteCents(_vertDragNote);
+      updateNotePanel(_vertDragNote);
+      drawEditor();
+      const now=Date.now();
+      if(now-_pitchThrottle>180){_pitchThrottle=now;_previewNote(_vertDragNote);}
+      edCanvas.style.cursor='ns-resize';
+    }
+    return;
+  }
   if(!rbMouseActive||!dragSelActive){
-    // Cursor hint: show cut cursor when hovering over a selected note (double-click splits)
+    // Cursor hint: ns-resize on any note, col-resize on selected note
     const rect=edCanvas.getBoundingClientRect();
     if(e.clientX>=rect.left&&e.clientX<=rect.right&&e.clientY>=rect.top&&e.clientY<=rect.bottom){
       const{x,y}=getCanvasXY(e.clientX,e.clientY);
       const hit=hitTest(x,y);
-      edCanvas.style.cursor=(hit&&hit.selected)?'col-resize':'crosshair';
+      edCanvas.style.cursor=hit?(hit.selected?'col-resize':'ns-resize'):'crosshair';
     }
     if(!dragSelActive)return;
   }
-  // Prevent the scroll container from scrolling during rubber-band drag
   e.preventDefault();
   const{x,y}=getCanvasXY(e.clientX,e.clientY);
   dragSelCurX=x;dragSelCurY=y;
@@ -1687,6 +1828,17 @@ window.addEventListener('mousemove',(e)=>{
 },{passive:false});
 
 window.addEventListener('mouseup',(e)=>{
+  // ── Commit vertical pitch drag ──
+  if(_vertDragNote){
+    if(_vertDragMoved){
+      pushUndo();
+      rebuildCorrectedBuffer();
+      refreshNoteList();
+    }
+    _vertDragNote=null; _vertDragMoved=false;
+    edCanvas.style.cursor='crosshair';
+    return;
+  }
   if(!rbMouseActive)return;
   rbMouseActive=false;
   dragSelActive=false;
@@ -1848,43 +2000,6 @@ function playNote(n){
   src.onended=()=>{ notePreviewSource=null; };
 }
 
-let monitorActive=false;
-let monitorNote=null;
-let monitorTimeout=null;
-
-function startMonitor(n){
-  monitorNote=n; monitorActive=true;
-  document.getElementById('np-monitor').textContent='■ stop';
-  document.getElementById('np-monitor').style.background='var(--accent)';
-  document.getElementById('np-monitor').style.color='#fff';
-  loopMonitor();
-}
-
-function loopMonitor(){
-  if(!monitorActive||!monitorNote||!audioCtx||!correctedBuffer) return;
-  if(notePreviewSource){ try{notePreviewSource.onended=null;notePreviewSource.stop();}catch(e){} }
-  if(isPlaying) pauseAudio();
-  const src=audioCtx.createBufferSource();
-  src.buffer=correctedBuffer;
-  src.connect(audioCtx.destination);
-  const dur=monitorNote.endTime-monitorNote.startTime;
-  src.start(0, monitorNote.startTime, dur);
-  notePreviewSource=src;
-  src.onended=()=>{ if(monitorActive) monitorTimeout=setTimeout(loopMonitor,120); };
-}
-
-function stopMonitor(){
-  monitorActive=false; monitorNote=null;
-  if(monitorTimeout){ clearTimeout(monitorTimeout); monitorTimeout=null; }
-  if(notePreviewSource){ try{notePreviewSource.onended=null;notePreviewSource.stop();}catch(e){} notePreviewSource=null; }
-  const btn=document.getElementById('np-monitor');
-  if(btn){ btn.textContent='▶ monitor'; btn.style.background='transparent'; btn.style.color=''; }
-}
-
-document.getElementById('np-monitor').onclick=()=>{
-  if(monitorActive){ stopMonitor(); }
-  else if(selectedNote){ startMonitor(selectedNote); }
-};
 function updateNotePanel(n){
   // Invariant: n.midi already equals n.midiOrig + n.tuneOffset (the effective/displayed pitch).
   // Do NOT add tuneOffset again.
@@ -1918,8 +2033,37 @@ npPitchSl.oninput=()=>{
   npPitchVal.textContent=(cents>0?'+':'')+cents+'¢';
   updateNotePanel(selectedNote);
   drawEditor();
+  // Live preview: play a short snippet from original buffer pitch-shifted on the fly
+  const now=Date.now();
+  if(now-_pitchThrottle>200){
+    _pitchThrottle=now;
+    _previewNote(selectedNote);
+  }
 };
-npPitchSl.onchange=()=>{ if(selectedNote){pushUndo();rebuildCorrectedBuffer();refreshNoteList();playNote(selectedNote);} };
+npPitchSl.onchange=()=>{
+  if(!selectedNote)return;
+  rebuildCorrectedBuffer();
+  playNote(selectedNote);
+  pushUndo();refreshNoteList();
+};
+
+// Lightweight preview: plays 400ms of the note from original buffer with Web Audio playbackRate
+// No WSOLA — just resampling. Fast enough for real-time feedback.
+function _previewNote(n){
+  if(!audioCtx||!originalBuffer) return;
+  if(audioCtx.state==='suspended') audioCtx.resume();
+  if(notePreviewSource){try{notePreviewSource.onended=null;notePreviewSource.stop();}catch(e){}}
+  const src=audioCtx.createBufferSource();
+  src.buffer=originalBuffer;
+  src.playbackRate.value=Math.pow(2, n.tuneOffset/12);
+  src.connect(audioCtx.destination);
+  const noteDur=n.endTime-n.startTime;
+  const dur=Math.min(0.5, noteDur);
+  const startAt=n.startTime + noteDur*0.2;
+  src.start(0, Math.max(0,startAt), dur);
+  notePreviewSource=src;
+  src.onended=()=>{notePreviewSource=null;};
+}
 
 // vibrato slider input
 npVibSl.oninput=()=>{
@@ -2044,6 +2188,8 @@ document.getElementById('np-split').onclick=()=>{
     originalStartSample:n.originalStartSample??n.startSample
   };
   notes.splice(idx,1,first,second);
+  // Recalculate displayEnd immediately to prevent visual overlap
+  for(let _n=0;_n<notes.length;_n++){const _nx=notes[_n+1];notes[_n].displayEnd=_nx?Math.min(notes[_n].endTime,_nx.startTime-0.002):notes[_n].endTime;}
   selectedNote=second;
   showNotePanel(second);
   rebuildCorrectedBuffer();
@@ -2288,13 +2434,6 @@ function rebuildCorrectedBuffer(){
     }
   });
   updateMinimap();
-  // If monitor is active, restart it with the fresh buffer
-  if(monitorActive&&monitorNote){
-    const updated=notes.find(n=>n.startTime===monitorNote.startTime)||monitorNote;
-    monitorNote=updated;
-    if(notePreviewSource){try{notePreviewSource.onended=null;notePreviewSource.stop();}catch(e){}}
-    setTimeout(loopMonitor,80);
-  }
 }
 
 // ══ FILENAME DIALOG ══════════════════════════════════════════
