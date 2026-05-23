@@ -352,12 +352,26 @@ function detectPitch(buf,sr){
 
   let freq=sr/bestL;
 
-  // Octave correction — upward only (original behaviour)
+  // Octave correction — bidirectional.
+  // (A) If freq < 400 Hz, check if the half-lag (double freq) also has a strong peak.
+  //     If it does AND its correlation is close to bestR → the true pitch may be one octave UP.
+  //     Threshold tightened to 0.90 to avoid false up-shifts on rich/complex timbres.
   if(freq>55&&freq<400){
     const halfLag=Math.round(bestL/2);
     if(halfLag>=minP&&halfLag<n/2){
       const rDouble=getR(buf,n,halfLag);
-      if(rDouble>bestR*0.82) freq*=2;
+      if(rDouble>bestR*0.90) freq*=2;
+    }
+  }
+  // (B) If freq > 300 Hz, check if double-lag (half freq) is also strong.
+  //     Autocorrelation sometimes picks up the 2nd harmonic period instead of fundamental.
+  //     If the double-lag correlation is strong (>0.85) → shift down one octave.
+  //     Only apply when the resulting freq would be in the vocal range (>55 Hz).
+  if(freq>300&&freq<1100){
+    const dblLag=Math.round(bestL*2);
+    if(dblLag<=maxP&&dblLag<n/2){
+      const rHalf=getR(buf,n,dblLag);
+      if(rHalf>bestR*0.85) freq/=2;
     }
   }
 
@@ -933,50 +947,57 @@ function analyzeBuffer(buf){
   }
 
   // Pass 6: octave continuity — fix whole-segment octave errors.
-  // If a note is 11–13 semitones away from BOTH its prev and next neighbours,
-  // and the neighbours are close to each other (≤4st apart), it is almost certainly
-  // an octave-detection error for the whole segment. Shift it by ±12 to match context.
-  // Only correct if the shifted version is closer to neighbours than the original.
-  // Run twice to catch chains.
-  for(let pass=0;pass<4;pass++){
-    for(let n=0;n<notes.length;n++){
-      // Look up to 2 neighbours each side for context — handles chains of errors
-      const prev2=n>1?notes[n-2]:null;
-      const prev=n>0?notes[n-1]:null;
-      const next=n<notes.length-1?notes[n+1]:null;
-      const next2=n<notes.length-2?notes[n+2]:null;
-      if(!prev&&!next&&!prev2&&!next2) continue;
-      const midi=notes[n].midi;
-      // build context from up to 4 neighbours, weighted by proximity
-      const ctxMidis=[];
-      if(prev) ctxMidis.push(prev.midi,prev.midi); // double weight for immediate neighbours
-      if(next) ctxMidis.push(next.midi,next.midi);
-      if(prev2) ctxMidis.push(prev2.midi);
-      if(next2) ctxMidis.push(next2.midi);
-      if(ctxMidis.length===0) continue;
-      // Use median instead of mean — robust to cases where some neighbours are also wrong
-      ctxMidis.sort((a,b)=>a-b);
-      const ctx=ctxMidis[Math.floor(ctxMidis.length/2)];
-      const dist=Math.abs(midi-ctx);
-      // Only act on near-octave jumps (9–15st) — catches both 8va and 8vb errors
-      if(dist>=5&&dist<=17){
-        const downDist=Math.abs((midi-12)-ctx);
-        const upDist  =Math.abs((midi+12)-ctx);
-        if(downDist<dist&&downDist<upDist){
-          // shift down one octave
-          notes[n].midi    -=12; notes[n].midiOrig-=12;
-          notes[n].freq     =midi2f(notes[n].midi);
-          notes[n].cents    =Math.round((notes[n].midi-snapMidi(notes[n].midi))*100);
-        } else if(upDist<dist){
-          // shift up one octave
-          notes[n].midi    +=12; notes[n].midiOrig+=12;
-          notes[n].freq     =midi2f(notes[n].midi);
-          notes[n].cents    =Math.round((notes[n].midi-snapMidi(notes[n].midi))*100);
+  // Uses a global median anchor in addition to local neighbours.
+  // This handles the case where several consecutive notes are all one octave too high —
+  // local-only context fails because the neighbours are also wrong; the global median
+  // (computed once before any corrections) gives a stable reference pitch for the song.
+  // Run 4 passes to catch chains.
+  {
+    // Compute global median once (before any corrections touch the array).
+    const allMidis=[...notes].map(n=>n.midi).sort((a,b)=>a-b);
+    const globalMedian=allMidis.length>0?allMidis[Math.floor(allMidis.length/2)]:60;
+
+    for(let pass=0;pass<4;pass++){
+      for(let n=0;n<notes.length;n++){
+        const prev2=n>1?notes[n-2]:null;
+        const prev=n>0?notes[n-1]:null;
+        const next=n<notes.length-1?notes[n+1]:null;
+        const next2=n<notes.length-2?notes[n+2]:null;
+        const midi=notes[n].midi;
+
+        // Build local context — immediate neighbours weighted double
+        const ctxMidis=[];
+        if(prev)  ctxMidis.push(prev.midi, prev.midi);
+        if(next)  ctxMidis.push(next.midi, next.midi);
+        if(prev2) ctxMidis.push(prev2.midi);
+        if(next2) ctxMidis.push(next2.midi);
+
+        // Also include global median as a weak anchor (single weight)
+        // so isolated runs of wrong-octave notes still get corrected.
+        ctxMidis.push(globalMedian);
+
+        ctxMidis.sort((a,b)=>a-b);
+        const ctx=ctxMidis[Math.floor(ctxMidis.length/2)];
+        const dist=Math.abs(midi-ctx);
+
+        // Act on jumps of 5–17 semitones (covers both 8va and 8vb errors with tolerance)
+        if(dist>=5&&dist<=17){
+          const downDist=Math.abs((midi-12)-ctx);
+          const upDist  =Math.abs((midi+12)-ctx);
+          if(downDist<dist&&downDist<upDist){
+            notes[n].midi    -=12; notes[n].midiOrig-=12;
+            notes[n].freq     =midi2f(notes[n].midi);
+            notes[n].cents    =Math.round((notes[n].midi-snapMidi(notes[n].midi))*100);
+          } else if(upDist<dist){
+            notes[n].midi    +=12; notes[n].midiOrig+=12;
+            notes[n].freq     =midi2f(notes[n].midi);
+            notes[n].cents    =Math.round((notes[n].midi-snapMidi(notes[n].midi))*100);
+          }
         }
       }
     }
   }
-}
+} // end analyzeBuffer
 
 // ══ EDITOR CANVAS ════════════════════════════════════════════
 const edScroll=document.getElementById('ed-scroll');
