@@ -183,6 +183,10 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
 <div class="screen hidden" id="proc-screen">
   <div class="proc-ring"></div>
   <div class="proc-text" id="proc-text">analyzing pitch...</div>
+  <div style="width:200px;height:4px;background:var(--border);border-radius:99px;overflow:hidden;margin-top:8px">
+    <div id="proc-bar" style="height:100%;width:0%;background:var(--accent);border-radius:99px;transition:width .15s ease"></div>
+  </div>
+  <div id="proc-pct" style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:4px">0%</div>
 </div>
 
 <!-- ══ SCREEN 3: EDITOR ══════════════════════════════════════ -->
@@ -243,6 +247,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
         <button class="np-snap-btn" id="np-snap">snap</button>
         <button class="np-snap-btn" id="np-merge" title="Merge with next note">merge→</button>
         <button class="np-snap-btn" id="np-split" title="Split note in half">split</button>
+        <button class="np-snap-btn" id="np-monitor" title="Monitor: loop this note while editing" style="background:transparent">▶ monitor</button>
         <button class="np-close" id="np-close">✕</button>
       </div>
       <div class="np-row">
@@ -545,8 +550,14 @@ async function loadAudioFromUrl(urlOrBuffer,name){
   originalBuffer=await audioCtx.decodeAudioData(ab);
   correctedBuffer=cloneBuffer(originalBuffer);
   document.getElementById('proc-text').textContent='detecting notes...';
+  document.getElementById('proc-bar').style.width='0%';
+  document.getElementById('proc-pct').textContent='0%';
   await new Promise(r=>setTimeout(r,50));
-  analyzeBuffer(originalBuffer);
+  analyzeBuffer(originalBuffer,(p)=>{
+    const pct=Math.round(p*100);
+    document.getElementById('proc-bar').style.width=pct+'%';
+    document.getElementById('proc-pct').textContent=pct+'%';
+  });
   // Save a deep snapshot of the freshly-analysed notes for Reset All
   originalNotes=notes.map(n=>({...n}));
   // Reset quantize slider for the new recording — no leftover state from a previous session
@@ -565,9 +576,9 @@ async function loadAudioFromUrl(urlOrBuffer,name){
     updateMidiRange();
     // Auto-fit vertical zoom so the note range fills ~70% of screen height
     const wrap=document.querySelector('.editor-wrap');
-    const availH=(wrap?wrap.clientHeight:500)*0.85;
+    const availH=(wrap?wrap.clientHeight:500)*1.0;
     const targetRowH=Math.floor(availH/Math.max(MIDI_RANGE,8));
-    ROW_H=Math.max(14,Math.min(36,targetRowH));
+    ROW_H=Math.max(18,Math.min(44,targetRowH));
     initEditorCanvas();
     drawEditor();
     updateMinimap();
@@ -665,7 +676,7 @@ function splitOnRmsDips(voicedFrames, HOP_MS) {
   return parts;
 }
 
-function analyzeBuffer(buf) {
+function analyzeBuffer(buf, onProgress) {
   const sr  = buf.sampleRate;
   const data = buf.getChannelData(0);
   const WIN = 4096, HOP = 512;
@@ -681,6 +692,7 @@ function analyzeBuffer(buf) {
       midi:  freq > 0 ? f2midi(freq) : 0,
       voiced: freq > 0 && rms > 0.005, rms
     });
+    if (onProgress && frames.length % 80 === 0) onProgress(i / data.length * 0.9);
   }
 
   // Pass 2 — median smooth (vibrato suppression)
@@ -822,6 +834,7 @@ function analyzeBuffer(buf) {
     const nx = notes[n+1];
     notes[n].displayEnd = nx ? Math.min(notes[n].endTime, nx.startTime - 0.002) : notes[n].endTime;
   }
+  if (onProgress) onProgress(1.0);
 }
 
 // ══ EDITOR CANVAS ════════════════════════════════════════════
@@ -1098,6 +1111,35 @@ function drawBlob(n){
     ec.fillStyle=n.selected?base:stroke;
     ec.textAlign='left';
     ec.fillText((totalCents>0?'+':'')+totalCents+'¢',x+4,y+BLOB_H-3);
+  }
+
+  // ── pitch curve (shows vibrato / pitch variation over time) ──
+  if(w>40&&n.pitchSegments&&n.pitchSegments.length>=3){
+    const segs=n.pitchSegments;
+    const medM=segs.map(s=>s.midi).sort((a,b)=>a-b);
+    const med=medM[Math.floor(medM.length/2)];
+    const RANGE=2.0; // ±2 semitones maps to full height
+    const curveY=centerY;
+    const curveH=(BLOB_H*0.38);
+    const tStart=segs[0].t/originalBuffer.sampleRate;
+    const tEnd=segs[segs.length-1].t/originalBuffer.sampleRate;
+    const tSpan=Math.max(0.001,tEnd-tStart);
+    ec.save();
+    ec.beginPath();
+    ec.rect(x+2,y+2,w-4,BLOB_H-4);
+    ec.clip();
+    ec.strokeStyle=`rgba(${hexToRgb(base)},0.65)`;
+    ec.lineWidth=1.2;
+    ec.lineJoin='round';
+    ec.beginPath();
+    for(let s=0;s<segs.length;s++){
+      const t=segs[s].t/originalBuffer.sampleRate;
+      const cx=x+(t-tStart)/tSpan*w;
+      const cy=curveY-((segs[s].midi-med)/RANGE)*curveH;
+      if(s===0) ec.moveTo(cx,cy); else ec.lineTo(cx,cy);
+    }
+    ec.stroke();
+    ec.restore();
   }
 
   ec.textAlign='left';
@@ -1627,7 +1669,16 @@ edScroll.addEventListener('wheel',(e)=>{
 },{passive:false,capture:true});
 
 window.addEventListener('mousemove',(e)=>{
-  if(!rbMouseActive||!dragSelActive)return;
+  if(!rbMouseActive||!dragSelActive){
+    // Cursor hint: show cut cursor when hovering over a selected note (double-click splits)
+    const rect=edCanvas.getBoundingClientRect();
+    if(e.clientX>=rect.left&&e.clientX<=rect.right&&e.clientY>=rect.top&&e.clientY<=rect.bottom){
+      const{x,y}=getCanvasXY(e.clientX,e.clientY);
+      const hit=hitTest(x,y);
+      edCanvas.style.cursor=(hit&&hit.selected)?'col-resize':'crosshair';
+    }
+    if(!dragSelActive)return;
+  }
   // Prevent the scroll container from scrolling during rubber-band drag
   e.preventDefault();
   const{x,y}=getCanvasXY(e.clientX,e.clientY);
@@ -1783,12 +1834,10 @@ document.getElementById('np-multi-snap').onclick=()=>{
 let notePreviewSource=null;
 function playNote(n){
   if(!audioCtx||!correctedBuffer) return;
-  // stop any current preview or main playback
   if(notePreviewSource){
     try{notePreviewSource.onended=null;notePreviewSource.stop();}catch(e){}
   }
   if(isPlaying) pauseAudio();
-
   const src=audioCtx.createBufferSource();
   src.buffer=correctedBuffer;
   src.connect(audioCtx.destination);
@@ -1798,6 +1847,44 @@ function playNote(n){
   notePreviewSource=src;
   src.onended=()=>{ notePreviewSource=null; };
 }
+
+let monitorActive=false;
+let monitorNote=null;
+let monitorTimeout=null;
+
+function startMonitor(n){
+  monitorNote=n; monitorActive=true;
+  document.getElementById('np-monitor').textContent='■ stop';
+  document.getElementById('np-monitor').style.background='var(--accent)';
+  document.getElementById('np-monitor').style.color='#fff';
+  loopMonitor();
+}
+
+function loopMonitor(){
+  if(!monitorActive||!monitorNote||!audioCtx||!correctedBuffer) return;
+  if(notePreviewSource){ try{notePreviewSource.onended=null;notePreviewSource.stop();}catch(e){} }
+  if(isPlaying) pauseAudio();
+  const src=audioCtx.createBufferSource();
+  src.buffer=correctedBuffer;
+  src.connect(audioCtx.destination);
+  const dur=monitorNote.endTime-monitorNote.startTime;
+  src.start(0, monitorNote.startTime, dur);
+  notePreviewSource=src;
+  src.onended=()=>{ if(monitorActive) monitorTimeout=setTimeout(loopMonitor,120); };
+}
+
+function stopMonitor(){
+  monitorActive=false; monitorNote=null;
+  if(monitorTimeout){ clearTimeout(monitorTimeout); monitorTimeout=null; }
+  if(notePreviewSource){ try{notePreviewSource.onended=null;notePreviewSource.stop();}catch(e){} notePreviewSource=null; }
+  const btn=document.getElementById('np-monitor');
+  if(btn){ btn.textContent='▶ monitor'; btn.style.background='transparent'; btn.style.color=''; }
+}
+
+document.getElementById('np-monitor').onclick=()=>{
+  if(monitorActive){ stopMonitor(); }
+  else if(selectedNote){ startMonitor(selectedNote); }
+};
 function updateNotePanel(n){
   // Invariant: n.midi already equals n.midiOrig + n.tuneOffset (the effective/displayed pitch).
   // Do NOT add tuneOffset again.
@@ -2095,43 +2182,39 @@ function rebuildCorrectedBuffer(){
     const segLen=end-start;
     if(segLen<1)return;
 
-    // Vibrato reduction builds a per-sample ratio array. Without vibrato, the ratio
-    // is constant (2^(tuneOffset/12)). With vibrato, we add a time-varying delta that
-    // flattens pitch excursions while preserving the average pitch.
-    let ratioArray=null; // null = use constant ratio below
+    // Build per-sample ratio for pitch shifting.
+    // For vibrato reduction: detect pitch per frame, smooth toward median, compute ratio.
+    let ratioArray=null;
     if(hasVibrato){
       const vAmt=(n.vibratoReduction||0)/100;
-      const src0=originalBuffer.getChannelData(0);
-      // Track pitch per frame inside the segment.
-      const WIN=1024,HOP=256;
-      const pitches=[]; // {t:centerSample, midi} for each voiced frame
-      for(let i=start;i+WIN<end;i+=HOP){
-        const sl=src0.slice(i,i+WIN);
-        const{freq,rms}=detectPitch(sl,sr);
-        if(freq>0&&rms>0.003) pitches.push({t:i+WIN/2, midi:f2midi(freq)});
-      }
-      if(pitches.length>=3){
-        // Average midi across the note — the "stable center pitch"
-        const avgMidi=pitches.reduce((s,p)=>s+p.midi,0)/pitches.length;
-        // Build a per-sample ratio: flatten the deviation from avg by vAmt.
-        //   per-frame deviation = midi[i] - avgMidi
-        //   we want new pitch = midi[i] - deviation*vAmt = midi[i]*(1-vAmt) + avgMidi*vAmt
-        //   shift needed     = new - midi[i] = -deviation*vAmt
-        //   plus the user's tuneOffset on top
-        ratioArray=new Float32Array(segLen);
+      // Use stored pitchSegments (already smoothed during analysis) instead of
+      // re-detecting pitch — avoids noisy per-frame detection causing alien artefacts
+      const segs=(n.pitchSegments&&n.pitchSegments.length>=2)?n.pitchSegments:null;
+      if(segs){
+        const mids=segs.map(p=>p.midi).sort((a,b)=>a-b);
+        const medMidi=mids[Math.floor(mids.length/2)];
+        ratioArray=new Float32Array(segLen).fill(Math.pow(2,n.tuneOffset/12));
         let pIdx=0;
         for(let i=0;i<segLen;i++){
           const absPos=start+i;
-          // advance pIdx so pitches[pIdx].t <= absPos < pitches[pIdx+1].t
-          while(pIdx<pitches.length-2 && pitches[pIdx+1].t<=absPos) pIdx++;
-          const p0=pitches[pIdx], p1=pitches[Math.min(pIdx+1,pitches.length-1)];
+          while(pIdx<segs.length-2&&segs[pIdx+1].t<=absPos) pIdx++;
+          const p0=segs[pIdx],p1=segs[Math.min(pIdx+1,segs.length-1)];
           const span=Math.max(1,p1.t-p0.t);
           const frac=Math.max(0,Math.min(1,(absPos-p0.t)/span));
           const curMidi=p0.midi*(1-frac)+p1.midi*frac;
-          const flatten=-(curMidi-avgMidi)*vAmt;   // semitones to shift to flatten
-          const totalSemitones=n.tuneOffset+flatten;
-          ratioArray[i]=Math.pow(2,totalSemitones/12);
+          const targetMidi=medMidi+n.tuneOffset;
+          const shift=(targetMidi-curMidi)*vAmt+n.tuneOffset;
+          ratioArray[i]=Math.pow(2,shift/12);
         }
+        // Smooth ratio array — wide 40ms window prevents grain artifacts
+        const smWin=Math.round(sr*0.040);
+        const smoothed=new Float32Array(segLen);
+        for(let i=0;i<segLen;i++){
+          let sum=0,cnt=0;
+          for(let k=Math.max(0,i-smWin);k<=Math.min(segLen-1,i+smWin);k++){sum+=ratioArray[k];cnt++;}
+          smoothed[i]=sum/cnt;
+        }
+        ratioArray=smoothed;
       }
     }
     const constRatio=Math.pow(2,n.tuneOffset/12);
@@ -2140,61 +2223,78 @@ function rebuildCorrectedBuffer(){
       const src=originalBuffer.getChannelData(ch);
       const dst=correctedBuffer.getChannelData(ch);
 
-      // Build shifted segment. When vibrato reduction is on, ratio varies per sample.
-      // Use a phase accumulator so the output timebase remains continuous across
-      // varying ratios (no clicks from ratio jumps).
+      // Use WSOLA for clean pitch shifting with time preservation
+      const segSrc=src.subarray(start,end);
+      const rArr=ratioArray||new Float32Array(segLen).fill(constRatio);
+
+      // WSOLA parameters
+      const baseFreq=n.freq>50&&n.freq<1200?n.freq:200;
+      const period=Math.round(sr/baseFreq);
+      const grainSize=Math.max(Math.round(sr*0.025),period*3);
+      const hopOut=Math.round(grainSize/4);
+      const search=Math.round(period*1.5);
+
+      const strLen=segLen+grainSize*2;
+      const str=new Float32Array(strLen);
+      const wgt=new Float32Array(strLen);
+      let srcPos=0,lastRead=0;
+
+      for(let s=0;s<strLen-grainSize;s+=hopOut){
+        const idx=Math.min(segLen-1,Math.round(srcPos));
+        const r=rArr[idx];
+        const hopIn=hopOut/r;
+        let bestOff=0;
+        if(s>0&&Math.abs(r-1)>1e-4){
+          const corrLen=Math.min(512,Math.max(64,period));
+          const tmplS=Math.min(segLen-corrLen-1,Math.round(lastRead+hopOut));
+          const sS=Math.max(0,Math.floor(srcPos-search/2));
+          const sE=Math.min(segLen-corrLen-1,Math.floor(srcPos+search/2));
+          let minD=1e10;
+          if(tmplS>=0&&tmplS<segLen-corrLen){
+            for(let off=sS;off<sE;off++){
+              let d=0;for(let k=0;k<corrLen;k++) d+=Math.abs(segSrc[tmplS+k]-segSrc[off+k]);
+              if(d<minD){minD=d;bestOff=off-srcPos;}
+            }
+          }
+        }
+        const readS=Math.max(0,Math.min(segLen-grainSize,Math.round(srcPos+bestOff)));
+        lastRead=readS;
+        for(let j=0;j<grainSize;j++){
+          const oi=s+j; if(oi>=strLen) break;
+          const win=0.5*(1-Math.cos(2*Math.PI*j/(grainSize-1)));
+          const ri=readS+j; if(ri>=segLen) break;
+          str[oi]+=segSrc[ri]*win; wgt[oi]+=win;
+        }
+        srcPos+=hopIn; if(srcPos>=segLen) break;
+      }
+      for(let i=0;i<strLen;i++) if(wgt[i]>1e-6) str[i]/=wgt[i];
+
+      // Resample back to segLen using per-sample ratio (avoids time smear)
+      let cum=0;
       const tmp=new Float32Array(segLen);
-      let srcPos=0;
       for(let i=0;i<segLen;i++){
-        const r=ratioArray?ratioArray[i]:constRatio;
-        const srcIdx=start+srcPos;
-        const si=Math.floor(srcIdx);
-        const frac=srcIdx-si;
-        tmp[i]=si+1<src.length?(1-frac)*src[si]+frac*src[si+1]:src[Math.min(si,src.length-1)];
-        srcPos+=r;
-        if(srcPos>=segLen) srcPos=segLen-1;
+        const p=cum; const pi=Math.floor(p); const pf=p-pi;
+        const a=pi<strLen?str[pi]:0; const b=pi+1<strLen?str[pi+1]:a;
+        tmp[i]=(1-pf)*a+pf*b;
+        cum+=rArr[Math.min(i,segLen-1)];
       }
 
-      // ── Time-stretch tmp back to segLen so duration is preserved ──
-      // Use the actual pitch ratio (not srcPos which is just the last read position).
-      // stretchRatio = how compressed/expanded the pitched audio is vs original.
-      const avgRatio=ratioArray
-        ? ratioArray.reduce((s,v)=>s+v,0)/ratioArray.length
-        : constRatio;
-      const stretched=new Float32Array(segLen);
-      for(let i=0;i<segLen;i++){
-        // map output sample i → position in tmp (which has length segLen but only
-        // avgRatio*segLen valid pitched samples)
-        const sp=i*avgRatio;
-        const si2=Math.floor(sp);
-        const fr=sp-si2;
-        const a=si2<tmp.length?tmp[si2]:0;
-        const b=si2+1<tmp.length?tmp[si2+1]:a;
-        stretched[i]=(1-fr)*a+fr*b;
-      }
-
-      // vibrato reduction: blend toward segment-average pitch (smoothed copy)
-      // (vibrato reduction is now handled via the time-varying ratio array above —
-      //  no post-processing of sample values here)
-
-      // crossfade at start
+      // Crossfade into buffer
       const fadeIn=Math.min(FADE,segLen/2);
-      for(let i=0;i<fadeIn;i++){
-        const t=i/fadeIn;
-        dst[start+i]=src[start+i]*(1-t)+stretched[i]*t;
-      }
-      // middle
-      for(let i=fadeIn;i<segLen-fadeIn;i++) dst[start+i]=stretched[i];
-      // crossfade at end
+      for(let i=0;i<fadeIn;i++){const t=i/fadeIn;dst[start+i]=src[start+i]*(1-t)+tmp[i]*t;}
+      for(let i=fadeIn;i<segLen-fadeIn;i++) dst[start+i]=tmp[i];
       const fadeOut=Math.min(FADE,segLen/2);
-      for(let i=0;i<fadeOut;i++){
-        const t=i/fadeOut;
-        const pos=segLen-fadeOut+i;
-        dst[start+pos]=stretched[pos]*(1-t)+src[start+pos]*t;
-      }
+      for(let i=0;i<fadeOut;i++){const t=i/fadeOut;const p=segLen-fadeOut+i;dst[start+p]=tmp[p]*(1-t)+src[start+p]*t;}
     }
   });
   updateMinimap();
+  // If monitor is active, restart it with the fresh buffer
+  if(monitorActive&&monitorNote){
+    const updated=notes.find(n=>n.startTime===monitorNote.startTime)||monitorNote;
+    monitorNote=updated;
+    if(notePreviewSource){try{notePreviewSource.onended=null;notePreviewSource.stop();}catch(e){}}
+    setTimeout(loopMonitor,80);
+  }
 }
 
 // ══ FILENAME DIALOG ══════════════════════════════════════════
