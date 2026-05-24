@@ -233,10 +233,22 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
       <div class="note-panel-header">
         <span class="np-multi-header">Multi-select</span>
         <span class="np-multi-count" id="np-multi-count">0 notes</span>
+        <button class="np-multi-btn accent" id="np-multi-snap" style="margin-left:.5rem">snap all</button>
         <button class="np-close" id="np-multi-close" style="margin-left:auto">✕</button>
       </div>
-      <div class="np-multi-actions">
-        <button class="np-multi-btn accent" id="np-multi-snap">snap all</button>
+      <div class="np-row">
+        <span class="np-lbl">pitch</span>
+        <button class="np-step" id="npm-pitch-dn">-1st</button>
+        <input type="range" id="npm-pitch-sl" min="-400" max="400" value="0" step="1">
+        <button class="np-step" id="npm-pitch-up">+1st</button>
+        <span class="np-val" id="npm-pitch-val">0¢</span>
+      </div>
+      <div class="np-row">
+        <span class="np-lbl">vibrato</span>
+        <button class="np-step" id="npm-vib-dn">-</button>
+        <input type="range" id="npm-vib-sl" min="0" max="100" value="0" step="1">
+        <button class="np-step" id="npm-vib-up">+</button>
+        <span class="np-val" id="npm-vib-val">0%</span>
       </div>
     </div>
     <div class="note-panel-controls" id="note-panel-controls" style="display:none">
@@ -1117,13 +1129,21 @@ function drawBlob(n){
     const segs=n.pitchSegments;
     const medM=[...segs.map(s=>s.midi)].sort((a,b)=>a-b);
     const med=medM[Math.floor(medM.length/2)];
-    const RANGE=1.2; // ±1.2 semitones = full height — tighter = more dramatic
-    const graphTop=y+11;
+    const vAmt=(n.vibratoReduction||0)/100;
+
+    // Build display segments — apply vibrato reduction visually too
+    const dispSegs=segs.map(s=>({
+      t:s.t,
+      midi: vAmt>=1 ? med : s.midi+(med-s.midi)*vAmt
+    }));
+
+    const RANGE=1.2;
+    const graphTop=y+10;
     const graphBot=y+BLOB_H-3;
     const graphH=graphBot-graphTop;
     const graphMid=graphTop+graphH/2;
-    const tStart=segs[0].t/originalBuffer.sampleRate;
-    const tEnd=segs[segs.length-1].t/originalBuffer.sampleRate;
+    const tStart=dispSegs[0].t/originalBuffer.sampleRate;
+    const tEnd=dispSegs[dispSegs.length-1].t/originalBuffer.sampleRate;
     const tSpan=Math.max(0.001,tEnd-tStart);
 
     const segX=s=>Math.max(x+2,Math.min(x+w-2, x+(s.t/originalBuffer.sampleRate-tStart)/tSpan*w));
@@ -1132,8 +1152,8 @@ function drawBlob(n){
     ec.save();
     ec.beginPath(); ec.rect(x+2,graphTop-1,w-4,graphH+2); ec.clip();
 
-    // center line
-    ec.strokeStyle='rgba(255,255,255,0.20)';
+    // center line (dashed)
+    ec.strokeStyle='rgba(255,255,255,0.25)';
     ec.lineWidth=1;
     ec.setLineDash([3,3]);
     ec.beginPath(); ec.moveTo(x+2,graphMid); ec.lineTo(x+w-2,graphMid); ec.stroke();
@@ -1141,21 +1161,21 @@ function drawBlob(n){
 
     // filled area
     ec.beginPath();
-    ec.moveTo(segX(segs[0]),graphMid);
-    for(let s=0;s<segs.length;s++) ec.lineTo(segX(segs[s]),segY(segs[s]));
-    ec.lineTo(segX(segs[segs.length-1]),graphMid);
+    ec.moveTo(segX(dispSegs[0]),graphMid);
+    for(let s=0;s<dispSegs.length;s++) ec.lineTo(segX(dispSegs[s]),segY(dispSegs[s]));
+    ec.lineTo(segX(dispSegs[dispSegs.length-1]),graphMid);
     ec.closePath();
-    ec.fillStyle=n.selected?'rgba(0,255,180,0.30)':'rgba(255,255,255,0.18)';
+    ec.fillStyle=n.selected?'rgba(0,255,180,0.32)':'rgba(255,255,255,0.20)';
     ec.fill();
 
     // curve line — thick and bright
     ec.beginPath();
-    for(let s=0;s<segs.length;s++){
-      if(s===0) ec.moveTo(segX(segs[s]),segY(segs[s]));
-      else ec.lineTo(segX(segs[s]),segY(segs[s]));
+    for(let s=0;s<dispSegs.length;s++){
+      if(s===0) ec.moveTo(segX(dispSegs[s]),segY(dispSegs[s]));
+      else ec.lineTo(segX(dispSegs[s]),segY(dispSegs[s]));
     }
-    ec.strokeStyle=n.selected?'rgba(0,255,180,1.0)':'rgba(255,255,255,0.85)';
-    ec.lineWidth=2.0;
+    ec.strokeStyle=n.selected?'rgba(0,255,180,1.0)':'rgba(255,255,255,0.90)';
+    ec.lineWidth=2.2;
     ec.lineJoin='round';
     ec.lineCap='round';
     ec.stroke();
@@ -1953,6 +1973,13 @@ function showMultiPanel(sel){
   npMulti.style.display='block';
   resetQSlider();
   document.getElementById('np-multi-count').textContent=sel.length+' notes';
+  // Reset sliders to neutral
+  npmPitchSl.value=0; npmPitchVal.textContent='0¢';
+  const avgVib=Math.round(sel.reduce((s,n)=>s+(n.vibratoReduction||0),0)/sel.length);
+  npmVibSl.value=avgVib; npmVibVal.textContent=avgVib+'%';
+  // Snapshot current offsets as base for relative pitch shift
+  _npmPitchBase={};
+  sel.forEach(n=>{ _npmPitchBase[n.startSample]=n.tuneOffset; });
 }
 function hideNotePanel(){
   npEmpty.style.display='block';
@@ -1980,6 +2007,76 @@ document.getElementById('np-multi-snap').onclick=()=>{
   });
   rebuildCorrectedBuffer();
   drawEditor();
+};
+
+// Multi pitch slider — relative offset applied to all selected notes
+const npmPitchSl=document.getElementById('npm-pitch-sl');
+const npmPitchVal=document.getElementById('npm-pitch-val');
+let _npmPitchBase={};  // store each note's tuneOffset at drag start
+npmPitchSl.addEventListener('mousedown',()=>{
+  notes.filter(n=>n.selected).forEach(n=>{ _npmPitchBase[n.startSample]=n.tuneOffset; });
+});
+npmPitchSl.oninput=()=>{
+  const delta=parseInt(npmPitchSl.value)/100;
+  npmPitchVal.textContent=(delta>=0?'+':'')+Math.round(delta*100)+'¢';
+  const sel=notes.filter(n=>n.selected);
+  sel.forEach(n=>{
+    const base=_npmPitchBase[n.startSample]??n.tuneOffset;
+    n.tuneOffset=base+delta;
+    n.midi=n.midiOrig+n.tuneOffset;
+    updateNoteCents(n);
+  });
+  drawEditor();
+};
+npmPitchSl.onchange=()=>{
+  pushUndo();
+  rebuildCorrectedBuffer();
+  drawEditor();
+  npmPitchSl.value=0;
+  npmPitchVal.textContent='0¢';
+  // re-snapshot base offsets after commit
+  notes.filter(n=>n.selected).forEach(n=>{ _npmPitchBase[n.startSample]=n.tuneOffset; });
+};
+document.getElementById('npm-pitch-dn').onclick=()=>{
+  pushUndo();
+  notes.filter(n=>n.selected).forEach(n=>{
+    n.tuneOffset-=1; n.midi=n.midiOrig+n.tuneOffset; updateNoteCents(n);
+  });
+  rebuildCorrectedBuffer(); drawEditor();
+};
+document.getElementById('npm-pitch-up').onclick=()=>{
+  pushUndo();
+  notes.filter(n=>n.selected).forEach(n=>{
+    n.tuneOffset+=1; n.midi=n.midiOrig+n.tuneOffset; updateNoteCents(n);
+  });
+  rebuildCorrectedBuffer(); drawEditor();
+};
+
+// Multi vibrato slider
+const npmVibSl=document.getElementById('npm-vib-sl');
+const npmVibVal=document.getElementById('npm-vib-val');
+npmVibSl.oninput=()=>{
+  const v=parseInt(npmVibSl.value);
+  npmVibVal.textContent=v+'%';
+  notes.filter(n=>n.selected).forEach(n=>{ n.vibratoReduction=v; });
+  drawEditor();
+};
+npmVibSl.onchange=()=>{ rebuildCorrectedBuffer(); drawEditor(); };
+document.getElementById('npm-vib-dn').onclick=()=>{
+  const sel=notes.filter(n=>n.selected); if(!sel.length)return;
+  pushUndo();
+  sel.forEach(n=>{ n.vibratoReduction=Math.max(0,(n.vibratoReduction||0)-10); });
+  const avg=Math.round(sel.reduce((s,n)=>s+(n.vibratoReduction||0),0)/sel.length);
+  npmVibSl.value=avg; npmVibVal.textContent=avg+'%';
+  rebuildCorrectedBuffer(); drawEditor();
+};
+document.getElementById('npm-vib-up').onclick=()=>{
+  const sel=notes.filter(n=>n.selected); if(!sel.length)return;
+  pushUndo();
+  sel.forEach(n=>{ n.vibratoReduction=Math.min(100,(n.vibratoReduction||0)+10); });
+  const avg=Math.round(sel.reduce((s,n)=>s+(n.vibratoReduction||0),0)/sel.length);
+  npmVibSl.value=avg; npmVibVal.textContent=avg+'%';
+  rebuildCorrectedBuffer(); drawEditor();
 };
 
 // Play just the selected note segment from corrected buffer
@@ -2070,8 +2167,9 @@ npVibSl.oninput=()=>{
   if(!selectedNote)return;
   selectedNote.vibratoReduction=parseInt(npVibSl.value);
   npVibVal.textContent=selectedNote.vibratoReduction+'%';
+  drawEditor(); // update pitch graph in real time
 };
-npVibSl.onchange=()=>{ if(selectedNote) rebuildCorrectedBuffer(); };
+npVibSl.onchange=()=>{ if(selectedNote){ rebuildCorrectedBuffer(); drawEditor(); } };
 
 // step buttons
 document.getElementById('np-pitch-dn').onclick=()=>{
@@ -2328,39 +2426,42 @@ function rebuildCorrectedBuffer(){
     const segLen=end-start;
     if(segLen<1)return;
 
-    // Build per-sample ratio for pitch shifting.
-    // For vibrato reduction: detect pitch per frame, smooth toward median, compute ratio.
     let ratioArray=null;
     if(hasVibrato){
       const vAmt=(n.vibratoReduction||0)/100;
-      // Use stored pitchSegments (already smoothed during analysis) instead of
-      // re-detecting pitch — avoids noisy per-frame detection causing alien artefacts
       const segs=(n.pitchSegments&&n.pitchSegments.length>=2)?n.pitchSegments:null;
       if(segs){
         const mids=segs.map(p=>p.midi).sort((a,b)=>a-b);
         const medMidi=mids[Math.floor(mids.length/2)];
-        ratioArray=new Float32Array(segLen).fill(Math.pow(2,n.tuneOffset/12));
-        let pIdx=0;
-        for(let i=0;i<segLen;i++){
-          const absPos=start+i;
-          while(pIdx<segs.length-2&&segs[pIdx+1].t<=absPos) pIdx++;
-          const p0=segs[pIdx],p1=segs[Math.min(pIdx+1,segs.length-1)];
-          const span=Math.max(1,p1.t-p0.t);
-          const frac=Math.max(0,Math.min(1,(absPos-p0.t)/span));
-          const curMidi=p0.midi*(1-frac)+p1.midi*frac;
-          const targetMidi=medMidi+n.tuneOffset;
-          const shift=(targetMidi-curMidi)*vAmt+n.tuneOffset;
-          ratioArray[i]=Math.pow(2,shift/12);
+        const targetMidi=medMidi+n.tuneOffset;
+
+        // At 100% vibrato reduction → perfectly flat, use constant ratio
+        if(vAmt>=1.0){
+          ratioArray=new Float32Array(segLen).fill(Math.pow(2,n.tuneOffset/12));
+        } else {
+          ratioArray=new Float32Array(segLen);
+          let pIdx=0;
+          for(let i=0;i<segLen;i++){
+            const absPos=start+i;
+            while(pIdx<segs.length-2&&segs[pIdx+1].t<=absPos) pIdx++;
+            const p0=segs[pIdx],p1=segs[Math.min(pIdx+1,segs.length-1)];
+            const span=Math.max(1,p1.t-p0.t);
+            const frac=Math.max(0,Math.min(1,(absPos-p0.t)/span));
+            const curMidi=p0.midi*(1-frac)+p1.midi*frac;
+            // shift curMidi toward targetMidi by vAmt
+            const correctedMidi=curMidi+(targetMidi-curMidi)*vAmt;
+            ratioArray[i]=Math.pow(2,(correctedMidi-curMidi)/12);
+          }
+          // Smooth — wider window = smoother, 60ms
+          const smWin=Math.round(sr*0.060);
+          const smoothed=new Float32Array(segLen);
+          for(let i=0;i<segLen;i++){
+            let sum=0,cnt=0;
+            for(let k=Math.max(0,i-smWin);k<=Math.min(segLen-1,i+smWin);k++){sum+=ratioArray[k];cnt++;}
+            smoothed[i]=sum/cnt;
+          }
+          ratioArray=smoothed;
         }
-        // Smooth ratio array — wide 40ms window prevents grain artifacts
-        const smWin=Math.round(sr*0.040);
-        const smoothed=new Float32Array(segLen);
-        for(let i=0;i<segLen;i++){
-          let sum=0,cnt=0;
-          for(let k=Math.max(0,i-smWin);k<=Math.min(segLen-1,i+smWin);k++){sum+=ratioArray[k];cnt++;}
-          smoothed[i]=sum/cnt;
-        }
-        ratioArray=smoothed;
       }
     }
     const constRatio=Math.pow(2,n.tuneOffset/12);
