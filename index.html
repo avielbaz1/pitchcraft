@@ -280,6 +280,13 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
 
   <div class="bottom-panel">
     <div class="panel-row">
+      <span class="panel-lbl">noise</span>
+      <div class="slider-wrap">
+        <input type="range" id="nr-slider" min="0" max="100" value="0">
+      </div>
+      <span class="slider-val" id="nr-val">0%</span>
+    </div>
+    <div class="panel-row">
       <span class="panel-lbl">quantize</span>
       <div class="slider-wrap">
         <input type="range" id="q-slider" min="0" max="100" value="0">
@@ -597,7 +604,9 @@ async function loadAudioFromUrl(urlOrBuffer,name){
 }
 
 function cloneBuffer(src){
-  const dst=audioCtx.createBuffer(src.numberOfChannels,src.length,src.sampleRate);
+  if(!src) return null;
+  const ctx=audioCtx||(audioCtx=new(window.AudioContext||window.webkitAudioContext)());
+  const dst=ctx.createBuffer(src.numberOfChannels,src.length,src.sampleRate);
   for(let ch=0;ch<src.numberOfChannels;ch++) dst.getChannelData(ch).set(src.getChannelData(ch));
   return dst;
 }
@@ -2404,10 +2413,152 @@ document.getElementById('apply-btn').onclick=()=>{
   drawEditor();
 };
 
-// ══ BUFFER CORRECTION ════════════════════════════════════════
-function rebuildCorrectedBuffer(){
-  if(!originalBuffer)return;
-  // Recalculate displayEnd after any edit (split/merge/undo)
+// ══ NOISE REDUCER ════════════════════════════════════════════
+// Spectral Subtraction: estimate noise floor from quietest frames,
+// then subtract it from every frame. Simple, fast, no artifacts at low amounts.
+const nrSlider=document.getElementById('nr-slider');
+const nrVal=document.getElementById('nr-val');
+let _nrAmount=0;
+let _noiseProfile=null; // Float32Array of noise magnitude per FFT bin
+
+function buildNoiseProfile(data, sr){
+  const FFT=2048, HOP=512;
+  const numFrames=Math.floor((data.length-FFT)/HOP);
+  if(numFrames<4) return null;
+
+  // Compute RMS per frame
+  const rmsArr=[];
+  for(let i=0;i<numFrames;i++){
+    let s=0; const off=i*HOP;
+    for(let k=0;k<FFT;k++) s+=data[off+k]*data[off+k];
+    rmsArr.push({idx:i,rms:Math.sqrt(s/FFT)});
+  }
+  // Take the quietest 15% of frames as noise estimate
+  rmsArr.sort((a,b)=>a.rms-b.rms);
+  const noiseCount=Math.max(2,Math.floor(numFrames*0.15));
+  const noiseMag=new Float32Array(FFT/2+1);
+
+  for(let ni=0;ni<noiseCount;ni++){
+    const off=rmsArr[ni].idx*HOP;
+    // Hann window + DFT magnitude
+    const mag=spectrumMag(data,off,FFT);
+    for(let k=0;k<=FFT/2;k++) noiseMag[k]+=mag[k];
+  }
+  for(let k=0;k<=FFT/2;k++) noiseMag[k]/=noiseCount;
+  return noiseMag;
+}
+
+function spectrumMag(data, offset, FFT){
+  const re=new Float32Array(FFT), im=new Float32Array(FFT);
+  for(let i=0;i<FFT;i++){
+    const w=0.5*(1-Math.cos(2*Math.PI*i/(FFT-1)));
+    re[i]=(offset+i<data.length?data[offset+i]:0)*w;
+  }
+  // Cooley-Tukey FFT in-place
+  fftReal(re,im,FFT);
+  const mag=new Float32Array(FFT/2+1);
+  for(let k=0;k<=FFT/2;k++) mag[k]=Math.sqrt(re[k]*re[k]+im[k]*im[k]);
+  return mag;
+}
+
+function fftReal(re,im,n){
+  // bit-reversal
+  for(let i=1,j=0;i<n;i++){
+    let bit=n>>1;
+    for(;j&bit;bit>>=1) j^=bit;
+    j^=bit;
+    if(i<j){ let t=re[i];re[i]=re[j];re[j]=t; t=im[i];im[i]=im[j];im[j]=t; }
+  }
+  for(let len=2;len<=n;len<<=1){
+    const ang=-2*Math.PI/len;
+    const wRe=Math.cos(ang),wIm=Math.sin(ang);
+    for(let i=0;i<n;i+=len){
+      let curRe=1,curIm=0;
+      for(let j=0;j<len/2;j++){
+        const uRe=re[i+j],uIm=im[i+j];
+        const vRe=re[i+j+len/2]*curRe-im[i+j+len/2]*curIm;
+        const vIm=re[i+j+len/2]*curIm+im[i+j+len/2]*curRe;
+        re[i+j]=uRe+vRe; im[i+j]=uIm+vIm;
+        re[i+j+len/2]=uRe-vRe; im[i+j+len/2]=uIm-vIm;
+        const newRe=curRe*wRe-curIm*wIm;
+        curIm=curRe*wIm+curIm*wRe; curRe=newRe;
+      }
+    }
+  }
+}
+function applyNoiseReduction(srcBuffer, amount){
+  if(amount<=0||!_noiseProfile) return srcBuffer;
+  const sr=srcBuffer.sampleRate;
+  const FFT=2048, HOP=512;
+  // Use a temporary AudioContext in case main audioCtx isn't ready
+  const ctx=audioCtx||new(window.AudioContext||window.webkitAudioContext)({sampleRate:sr});
+  const dst=ctx.createBuffer(srcBuffer.numberOfChannels,srcBuffer.length,sr);
+
+  for(let ch=0;ch<srcBuffer.numberOfChannels;ch++){
+    const src=srcBuffer.getChannelData(ch);
+    const out=dst.getChannelData(ch);
+    out.set(src); // start from copy
+
+    const numFrames=Math.floor((src.length-FFT)/HOP);
+    const outW=new Float32Array(src.length);
+    const outWgt=new Float32Array(src.length);
+
+    for(let fi=0;fi<numFrames;fi++){
+      const off=fi*HOP;
+      const re=new Float32Array(FFT), im=new Float32Array(FFT);
+      const win=new Float32Array(FFT);
+      for(let i=0;i<FFT;i++){
+        win[i]=0.5*(1-Math.cos(2*Math.PI*i/(FFT-1)));
+        re[i]=(off+i<src.length?src[off+i]:0)*win[i];
+      }
+      fftReal(re,im,FFT);
+
+      // Spectral subtraction: suppress each bin by amount * noiseProfile
+      const suppression=amount*1.8; // scale so 100% = near-full noise removal
+      for(let k=1;k<FFT/2;k++){
+        const mag=Math.sqrt(re[k]*re[k]+im[k]*im[k]);
+        const noise=_noiseProfile[k]*suppression;
+        // Soft-knee: smoothly reduce rather than hard-zero (avoids musical noise)
+        const gain=mag>noise ? 1-(noise/mag)*0.85 : 0.05;
+        re[k]*=gain; im[k]*=gain;
+        // Mirror bins
+        re[FFT-k]*=gain; im[FFT-k]*=gain;
+      }
+
+      // IFFT
+      for(let i=0;i<FFT;i++) im[i]=-im[i];
+      fftReal(re,im,FFT);
+      for(let i=0;i<FFT;i++) re[i]/=FFT;
+
+      // Overlap-add with Hann window
+      for(let i=0;i<FFT;i++){
+        const idx=off+i; if(idx>=src.length) break;
+        outW[idx]+=re[i]*win[i];
+        outWgt[idx]+=win[i]*win[i];
+      }
+    }
+    // Normalize OLA
+    for(let i=0;i<src.length;i++){
+      out[i]=outWgt[i]>1e-6 ? outW[i]/outWgt[i] : src[i];
+    }
+  }
+  return dst;
+}
+
+nrSlider.oninput=()=>{
+  _nrAmount=parseInt(nrSlider.value)/100;
+  nrVal.textContent=nrSlider.value+'%';
+};
+nrSlider.onchange=()=>{
+  _nrAmount=parseInt(nrSlider.value)/100;
+  nrVal.textContent=nrSlider.value+'%';
+  // Build noise profile on first use
+  if(_nrAmount>0&&!_noiseProfile&&originalBuffer){
+    _noiseProfile=buildNoiseProfile(originalBuffer.getChannelData(0),originalBuffer.sampleRate);
+  }
+  rebuildCorrectedBuffer();
+  drawEditor();
+};
   for(let n=0;n<notes.length;n++){
     const nx=notes[n+1];
     notes[n].displayEnd=nx?Math.min(notes[n].endTime,nx.startTime-0.002):notes[n].endTime;
@@ -2534,6 +2685,129 @@ function rebuildCorrectedBuffer(){
       for(let i=0;i<fadeOut;i++){const t=i/fadeOut;const p=segLen-fadeOut+i;dst[start+p]=tmp[p]*(1-t)+src[start+p]*t;}
     }
   });
+
+function rebuildCorrectedBuffer(){
+  if(!originalBuffer)return;
+  correctedBuffer=cloneBuffer(originalBuffer);
+  const sr=originalBuffer.sampleRate;
+  const FADE=Math.floor(sr*0.020); // 20ms crossfade (was 8ms)
+
+  notes.forEach(n=>{
+    const hasShift=Math.abs(n.tuneOffset)>0.005;
+    const hasVibrato=(n.vibratoReduction||0)>0;
+    if(!hasShift&&!hasVibrato)return;
+
+    const start=Math.floor(n.startSample);
+    const end=Math.min(Math.ceil(n.endSample),originalBuffer.length);
+    const segLen=end-start;
+    if(segLen<1)return;
+
+    // Vibrato reduction builds a per-sample ratio array. Without vibrato, the ratio
+    // is constant (2^(tuneOffset/12)). With vibrato, we add a time-varying delta that
+    // flattens pitch excursions while preserving the average pitch.
+    let ratioArray=null; // null = use constant ratio below
+    if(hasVibrato){
+      const vAmt=(n.vibratoReduction||0)/100;
+      const src0=originalBuffer.getChannelData(0);
+      // Track pitch per frame inside the segment.
+      const WIN=1024,HOP=256;
+      const pitches=[]; // {t:centerSample, midi} for each voiced frame
+      for(let i=start;i+WIN<end;i+=HOP){
+        const sl=src0.slice(i,i+WIN);
+        const{freq,rms}=detectPitch(sl,sr);
+        if(freq>0&&rms>0.003) pitches.push({t:i+WIN/2, midi:f2midi(freq)});
+      }
+      if(pitches.length>=3){
+        // Average midi across the note — the "stable center pitch"
+        const avgMidi=pitches.reduce((s,p)=>s+p.midi,0)/pitches.length;
+        // Build a per-sample ratio: flatten the deviation from avg by vAmt.
+        //   per-frame deviation = midi[i] - avgMidi
+        //   we want new pitch = midi[i] - deviation*vAmt = midi[i]*(1-vAmt) + avgMidi*vAmt
+        //   shift needed     = new - midi[i] = -deviation*vAmt
+        //   plus the user's tuneOffset on top
+        ratioArray=new Float32Array(segLen);
+        let pIdx=0;
+        for(let i=0;i<segLen;i++){
+          const absPos=start+i;
+          // advance pIdx so pitches[pIdx].t <= absPos < pitches[pIdx+1].t
+          while(pIdx<pitches.length-2 && pitches[pIdx+1].t<=absPos) pIdx++;
+          const p0=pitches[pIdx], p1=pitches[Math.min(pIdx+1,pitches.length-1)];
+          const span=Math.max(1,p1.t-p0.t);
+          const frac=Math.max(0,Math.min(1,(absPos-p0.t)/span));
+          const curMidi=p0.midi*(1-frac)+p1.midi*frac;
+          const flatten=-(curMidi-avgMidi)*vAmt;   // semitones to shift to flatten
+          const totalSemitones=n.tuneOffset+flatten;
+          ratioArray[i]=Math.pow(2,totalSemitones/12);
+        }
+      }
+    }
+    const constRatio=Math.pow(2,n.tuneOffset/12);
+
+    for(let ch=0;ch<originalBuffer.numberOfChannels;ch++){
+      const src=originalBuffer.getChannelData(ch);
+      const dst=correctedBuffer.getChannelData(ch);
+
+      // Build shifted segment. When vibrato reduction is on, ratio varies per sample.
+      // Use a phase accumulator so the output timebase remains continuous across
+      // varying ratios (no clicks from ratio jumps).
+      const tmp=new Float32Array(segLen);
+      let srcPos=0;
+      for(let i=0;i<segLen;i++){
+        const r=ratioArray?ratioArray[i]:constRatio;
+        const srcIdx=start+srcPos;
+        const si=Math.floor(srcIdx);
+        const frac=srcIdx-si;
+        tmp[i]=si+1<src.length?(1-frac)*src[si]+frac*src[si+1]:src[Math.min(si,src.length-1)];
+        srcPos+=r;
+        if(srcPos>=segLen) srcPos=segLen-1;
+      }
+
+      // ── Time-stretch tmp back to segLen so duration is preserved ──
+      // Use the actual pitch ratio (not srcPos which is just the last read position).
+      // stretchRatio = how compressed/expanded the pitched audio is vs original.
+      const avgRatio=ratioArray
+        ? ratioArray.reduce((s,v)=>s+v,0)/ratioArray.length
+        : constRatio;
+      const stretched=new Float32Array(segLen);
+      for(let i=0;i<segLen;i++){
+        // map output sample i → position in tmp (which has length segLen but only
+        // avgRatio*segLen valid pitched samples)
+        const sp=i*avgRatio;
+        const si2=Math.floor(sp);
+        const fr=sp-si2;
+        const a=si2<tmp.length?tmp[si2]:0;
+        const b=si2+1<tmp.length?tmp[si2+1]:a;
+        stretched[i]=(1-fr)*a+fr*b;
+      }
+
+      // vibrato reduction: blend toward segment-average pitch (smoothed copy)
+      // (vibrato reduction is now handled via the time-varying ratio array above —
+      //  no post-processing of sample values here)
+
+      // crossfade at start
+      const fadeIn=Math.min(FADE,segLen/2);
+      for(let i=0;i<fadeIn;i++){
+        const t=i/fadeIn;
+        dst[start+i]=src[start+i]*(1-t)+stretched[i]*t;
+      }
+      // middle
+      for(let i=fadeIn;i<segLen-fadeIn;i++) dst[start+i]=stretched[i];
+      // crossfade at end
+      const fadeOut=Math.min(FADE,segLen/2);
+      for(let i=0;i<fadeOut;i++){
+        const t=i/fadeOut;
+        const pos=segLen-fadeOut+i;
+        dst[start+pos]=stretched[pos]*(1-t)+src[start+pos]*t;
+      }
+    }
+  });
+  // Apply noise reduction on top of pitch corrections
+  if(_nrAmount>0){
+    if(!_noiseProfile&&originalBuffer){
+      _noiseProfile=buildNoiseProfile(originalBuffer.getChannelData(0),originalBuffer.sampleRate);
+    }
+    correctedBuffer=applyNoiseReduction(correctedBuffer,_nrAmount);
+  }
   updateMinimap();
 }
 
