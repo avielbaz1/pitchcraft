@@ -2559,133 +2559,6 @@ nrSlider.onchange=()=>{
   rebuildCorrectedBuffer();
   drawEditor();
 };
-  for(let n=0;n<notes.length;n++){
-    const nx=notes[n+1];
-    notes[n].displayEnd=nx?Math.min(notes[n].endTime,nx.startTime-0.002):notes[n].endTime;
-  }
-  correctedBuffer=cloneBuffer(originalBuffer);
-  const sr=originalBuffer.sampleRate;
-  const FADE=Math.floor(sr*0.020); // 20ms crossfade (was 8ms)
-
-  notes.forEach(n=>{
-    const hasShift=Math.abs(n.tuneOffset)>0.005;
-    const hasVibrato=(n.vibratoReduction||0)>0;
-    if(!hasShift&&!hasVibrato)return;
-
-    const start=Math.floor(n.startSample);
-    const end=Math.min(Math.ceil(n.endSample),originalBuffer.length);
-    const segLen=end-start;
-    if(segLen<1)return;
-
-    let ratioArray=null;
-    if(hasVibrato){
-      const vAmt=(n.vibratoReduction||0)/100;
-      const segs=(n.pitchSegments&&n.pitchSegments.length>=2)?n.pitchSegments:null;
-      if(segs){
-        const mids=segs.map(p=>p.midi).sort((a,b)=>a-b);
-        const medMidi=mids[Math.floor(mids.length/2)];
-        const targetMidi=medMidi+n.tuneOffset;
-
-        // At 100% vibrato reduction → perfectly flat, use constant ratio
-        if(vAmt>=1.0){
-          ratioArray=new Float32Array(segLen).fill(Math.pow(2,n.tuneOffset/12));
-        } else {
-          ratioArray=new Float32Array(segLen);
-          let pIdx=0;
-          for(let i=0;i<segLen;i++){
-            const absPos=start+i;
-            while(pIdx<segs.length-2&&segs[pIdx+1].t<=absPos) pIdx++;
-            const p0=segs[pIdx],p1=segs[Math.min(pIdx+1,segs.length-1)];
-            const span=Math.max(1,p1.t-p0.t);
-            const frac=Math.max(0,Math.min(1,(absPos-p0.t)/span));
-            const curMidi=p0.midi*(1-frac)+p1.midi*frac;
-            // shift curMidi toward targetMidi by vAmt
-            const correctedMidi=curMidi+(targetMidi-curMidi)*vAmt;
-            ratioArray[i]=Math.pow(2,(correctedMidi-curMidi)/12);
-          }
-          // Smooth — wider window = smoother, 60ms
-          const smWin=Math.round(sr*0.060);
-          const smoothed=new Float32Array(segLen);
-          for(let i=0;i<segLen;i++){
-            let sum=0,cnt=0;
-            for(let k=Math.max(0,i-smWin);k<=Math.min(segLen-1,i+smWin);k++){sum+=ratioArray[k];cnt++;}
-            smoothed[i]=sum/cnt;
-          }
-          ratioArray=smoothed;
-        }
-      }
-    }
-    const constRatio=Math.pow(2,n.tuneOffset/12);
-
-    for(let ch=0;ch<originalBuffer.numberOfChannels;ch++){
-      const src=originalBuffer.getChannelData(ch);
-      const dst=correctedBuffer.getChannelData(ch);
-
-      // Use WSOLA for clean pitch shifting with time preservation
-      const segSrc=src.subarray(start,end);
-      const rArr=ratioArray||new Float32Array(segLen).fill(constRatio);
-
-      // WSOLA parameters
-      const baseFreq=n.freq>50&&n.freq<1200?n.freq:200;
-      const period=Math.round(sr/baseFreq);
-      const grainSize=Math.max(Math.round(sr*0.025),period*3);
-      const hopOut=Math.round(grainSize/4);
-      const search=Math.round(period*1.5);
-
-      const strLen=segLen+grainSize*2;
-      const str=new Float32Array(strLen);
-      const wgt=new Float32Array(strLen);
-      let srcPos=0,lastRead=0;
-
-      for(let s=0;s<strLen-grainSize;s+=hopOut){
-        const idx=Math.min(segLen-1,Math.round(srcPos));
-        const r=rArr[idx];
-        const hopIn=hopOut/r;
-        let bestOff=0;
-        if(s>0&&Math.abs(r-1)>1e-4){
-          const corrLen=Math.min(512,Math.max(64,period));
-          const tmplS=Math.min(segLen-corrLen-1,Math.round(lastRead+hopOut));
-          const sS=Math.max(0,Math.floor(srcPos-search/2));
-          const sE=Math.min(segLen-corrLen-1,Math.floor(srcPos+search/2));
-          let minD=1e10;
-          if(tmplS>=0&&tmplS<segLen-corrLen){
-            for(let off=sS;off<sE;off++){
-              let d=0;for(let k=0;k<corrLen;k++) d+=Math.abs(segSrc[tmplS+k]-segSrc[off+k]);
-              if(d<minD){minD=d;bestOff=off-srcPos;}
-            }
-          }
-        }
-        const readS=Math.max(0,Math.min(segLen-grainSize,Math.round(srcPos+bestOff)));
-        lastRead=readS;
-        for(let j=0;j<grainSize;j++){
-          const oi=s+j; if(oi>=strLen) break;
-          const win=0.5*(1-Math.cos(2*Math.PI*j/(grainSize-1)));
-          const ri=readS+j; if(ri>=segLen) break;
-          str[oi]+=segSrc[ri]*win; wgt[oi]+=win;
-        }
-        srcPos+=hopIn; if(srcPos>=segLen) break;
-      }
-      for(let i=0;i<strLen;i++) if(wgt[i]>1e-6) str[i]/=wgt[i];
-
-      // Resample back to segLen using per-sample ratio (avoids time smear)
-      let cum=0;
-      const tmp=new Float32Array(segLen);
-      for(let i=0;i<segLen;i++){
-        const p=cum; const pi=Math.floor(p); const pf=p-pi;
-        const a=pi<strLen?str[pi]:0; const b=pi+1<strLen?str[pi+1]:a;
-        tmp[i]=(1-pf)*a+pf*b;
-        cum+=rArr[Math.min(i,segLen-1)];
-      }
-
-      // Crossfade into buffer
-      const fadeIn=Math.min(FADE,segLen/2);
-      for(let i=0;i<fadeIn;i++){const t=i/fadeIn;dst[start+i]=src[start+i]*(1-t)+tmp[i]*t;}
-      for(let i=fadeIn;i<segLen-fadeIn;i++) dst[start+i]=tmp[i];
-      const fadeOut=Math.min(FADE,segLen/2);
-      for(let i=0;i<fadeOut;i++){const t=i/fadeOut;const p=segLen-fadeOut+i;dst[start+p]=tmp[p]*(1-t)+src[start+p]*t;}
-    }
-  });
-
 function rebuildCorrectedBuffer(){
   if(!originalBuffer)return;
   correctedBuffer=cloneBuffer(originalBuffer);
@@ -3082,9 +2955,12 @@ function refreshNoteList(){}
 
 // ══ BACK BUTTON ══════════════════════════════════════════════
 document.getElementById('back-btn').onclick=()=>{
-  stopAudio();
+  try{ stopAudio(); }catch(e){}
   notes=[];selectedNote=null;
   originalBuffer=null;correctedBuffer=null;
+  _noiseProfile=null;_nrAmount=0;
+  if(document.getElementById('nr-slider')) document.getElementById('nr-slider').value=0;
+  if(document.getElementById('nr-val')) document.getElementById('nr-val').textContent='0%';
   allChunks=[];chunkCount=0;
   videoSourceFile=null;videoSourceName='';
   document.getElementById('video-badge').style.display='none';
