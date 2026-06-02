@@ -2044,14 +2044,19 @@ document.getElementById('np-multi-merge').onclick=()=>{
   first.endTime=last.endTime;
   first.endSample=last.endSample;
   first.midiOrig=mergedOrig;
-  first.tuneOffset=0;
-  first.midi=mergedOrig;
-  first.freq=midi2f(mergedOrig);
-  first.cents=Math.round((mergedOrig-snapMidi(mergedOrig))*100);
+  // Keep existing tuneOffset so pitch doesn't jump
+  first.midi=mergedOrig+first.tuneOffset;
+  first.freq=midi2f(first.midi);
+  first.cents=Math.round((first.midi-snapMidi(first.midi))*100);
   first.preventMerge=false;
   // Remove all the other selected notes
   const toRemove=new Set(sel.slice(1));
   notes=notes.filter(n=>!toRemove.has(n));
+  // Recalculate displayEnd for all notes
+  for(let i=0;i<notes.length;i++){
+    const nx=notes[i+1];
+    notes[i].displayEnd=nx?Math.min(notes[i].endTime,nx.startTime-0.002):notes[i].endTime;
+  }
   // Select the merged note
   notes.forEach(n=>n.selected=false);
   first.selected=true;
