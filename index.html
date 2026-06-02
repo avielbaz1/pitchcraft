@@ -1309,7 +1309,7 @@ document.getElementById('reset-all-btn').onclick=()=>{
   const sel=notes.filter(n=>n.selected);
   const resetAll=sel.length===0;
 
-  pushUndo();
+  if(!resetAll) pushUndo();
 
   if(resetAll){
     notes=originalNotes.map(n=>({...n}));
