@@ -1303,8 +1303,21 @@ function drawEditor(){
   }
 }
 document.getElementById('undo-btn').onclick=()=>undo();
-document.getElementById('undo-btn').addEventListener('touchend',(e)=>{e.preventDefault();undo();},{passive:false});
+document.getElementById('undo-btn').addEventListener('touchend',(e)=>{
+  if(e.cancelable) e.preventDefault();
+  // Only fire if touch ended on this button
+  const r=e.currentTarget.getBoundingClientRect();
+  const t=e.changedTouches[0];
+  if(t.clientX>=r.left&&t.clientX<=r.right&&t.clientY>=r.top&&t.clientY<=r.bottom) undo();
+},{passive:false});
+document.getElementById('reset-all-btn').addEventListener('touchend',(e)=>{
+  if(e.cancelable) e.preventDefault();
+  const r=e.currentTarget.getBoundingClientRect();
+  const t=e.changedTouches[0];
+  if(t.clientX>=r.left&&t.clientX<=r.right&&t.clientY>=r.top&&t.clientY<=r.bottom) e.currentTarget.onclick();
+},{passive:false});
 document.getElementById('reset-all-btn').onclick=()=>{
+  console.log('[RESET] clicked, originalNotes:', originalNotes.length, 'undoStack:', undoStack.length);
   if(!originalNotes.length)return;
   const sel=notes.filter(n=>n.selected);
   const resetAll=sel.length===0;
