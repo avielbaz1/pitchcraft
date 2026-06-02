@@ -645,6 +645,7 @@ function undo(){
   console.log('[UNDO] undo called — stack size:', undoStack.length);
   if(!undoStack.length)return;
   _pitchSlDragging=false;
+  _vibSlDragging=false;
   notes=undoStack.pop();
   console.log('[UNDO] restored — tuneOffsets:', notes.map(n=>n.tuneOffset.toFixed(2)));
   if(!undoStack.length) document.getElementById('undo-btn').disabled=true;
@@ -1489,15 +1490,16 @@ edCanvas.addEventListener('touchstart',(e)=>{
     _mobilePitchStartY=t.clientY;
     _mobilePitchStartOffset=hit.tuneOffset;
     _mobilePitchActive=false;
+    _mobilePitchUndoPushed=false;
   } else {
     _mobilePitchNote=null;
   }
 },{passive:true});
 
-let _mobilePitchNote=null,_mobilePitchStartY=0,_mobilePitchStartOffset=0,_mobilePitchActive=false;
+let _mobilePitchNote=null,_mobilePitchStartY=0,_mobilePitchStartOffset=0,_mobilePitchActive=false,_mobilePitchUndoPushed=false;
 let _pitchThrottle=0;
 let _pitchSlDragging=false;
-let _vertDragNote=null,_vertDragStartY=0,_vertDragStartOffset=0,_vertDragMoved=false;
+let _vertDragNote=null,_vertDragStartY=0,_vertDragStartOffset=0,_vertDragMoved=false,_vertDragUndoPushed=false;
 
 edCanvas.addEventListener('touchmove',(e)=>{
   if(pinchActive&&e.touches.length>=2){
@@ -1525,6 +1527,7 @@ edCanvas.addEventListener('touchmove',(e)=>{
       tapMoved=true;
     }
     if(_mobilePitchActive){
+      if(!_mobilePitchUndoPushed){ pushUndo(); _mobilePitchUndoPushed=true; }
       e.preventDefault();
       // ROW_H px = 1 semitone = 100 cents
       const centsDelta=-Math.round(dy/(ROW_H/100));
@@ -1547,9 +1550,10 @@ edCanvas.addEventListener('touchmove',(e)=>{
 edCanvas.addEventListener('touchend',(e)=>{
   if(_mobilePitchActive&&_mobilePitchNote){
     _mobilePitchActive=false;
+    _mobilePitchUndoPushed=false;
     rebuildCorrectedBuffer();
     playNote(_mobilePitchNote);
-    pushUndo();refreshNoteList();
+    refreshNoteList();
     _mobilePitchNote=null;
     return;
   }
@@ -1801,6 +1805,7 @@ edCanvas.addEventListener('mousedown',(e)=>{
     _vertDragStartY=e.clientY;
     _vertDragStartOffset=hit.tuneOffset;
     _vertDragMoved=false;
+    _vertDragUndoPushed=false;
     dragSelStartClientX=e.clientX;dragSelStartClientY=e.clientY;
     // Select note on mousedown
     if(!e.shiftKey){notes.forEach(n=>n.selected=false);}
@@ -1833,6 +1838,7 @@ window.addEventListener('mousemove',(e)=>{
     const dy=e.clientY-_vertDragStartY;
     if(Math.abs(dy)>3) _vertDragMoved=true;
     if(_vertDragMoved){
+      if(!_vertDragUndoPushed){ pushUndo(); _vertDragUndoPushed=true; }
       // ROW_H pixels = 1 semitone
       const semDelta=-(dy/ROW_H);
       const newOffset=Math.max(-4,Math.min(4,_vertDragStartOffset+semDelta));
@@ -1867,11 +1873,10 @@ window.addEventListener('mouseup',(e)=>{
   // ── Commit vertical pitch drag ──
   if(_vertDragNote){
     if(_vertDragMoved){
-      pushUndo();
       rebuildCorrectedBuffer();
       refreshNoteList();
     }
-    _vertDragNote=null; _vertDragMoved=false;
+    _vertDragNote=null; _vertDragMoved=false; _vertDragUndoPushed=false;
     edCanvas.style.cursor='crosshair';
     return;
   }
@@ -1971,6 +1976,7 @@ function resetQSlider(){
 }
 function showNotePanel(n){
   _pitchSlDragging=false;
+  _vibSlDragging=false;
   npEmpty.style.display='none';
   npMulti.style.display='none';
   npControls.style.display='flex';
@@ -2213,13 +2219,22 @@ function _previewNote(n){
 }
 
 // vibrato slider input
+let _vibSlDragging=false;
+npVibSl.addEventListener('pointerdown',()=>{
+  if(!selectedNote)return;
+  if(!_vibSlDragging){ pushUndo(); _vibSlDragging=true; }
+},{passive:true});
 npVibSl.oninput=()=>{
   if(!selectedNote)return;
   selectedNote.vibratoReduction=parseInt(npVibSl.value);
   npVibVal.textContent=selectedNote.vibratoReduction+'%';
   drawEditor(); // update pitch graph in real time
 };
-npVibSl.onchange=()=>{ if(selectedNote){ rebuildCorrectedBuffer(); drawEditor(); } };
+npVibSl.onchange=()=>{
+  if(!selectedNote)return;
+  _vibSlDragging=false;
+  rebuildCorrectedBuffer(); drawEditor();
+};
 
 // step buttons
 document.getElementById('np-pitch-dn').onclick=()=>{
