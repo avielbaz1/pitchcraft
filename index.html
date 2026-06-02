@@ -638,11 +638,14 @@ function pushUndo(){
   undoStack.push(notes.map(n=>({...n})));
   if(undoStack.length>30) undoStack.shift();// max 30 steps
   document.getElementById('undo-btn').disabled=false;
+  console.log('[UNDO] pushUndo — stack size:', undoStack.length, '| top tuneOffsets:', undoStack[undoStack.length-1].map(n=>n.tuneOffset.toFixed(2)));
 }
 
 function undo(){
+  console.log('[UNDO] undo called — stack size:', undoStack.length);
   if(!undoStack.length)return;
   notes=undoStack.pop();
+  console.log('[UNDO] restored — tuneOffsets:', notes.map(n=>n.tuneOffset.toFixed(2)));
   if(!undoStack.length) document.getElementById('undo-btn').disabled=true;
   notes.forEach(n=>n.selected=false);
   selectedNote=null;
