@@ -644,6 +644,7 @@ function pushUndo(){
 function undo(){
   console.log('[UNDO] undo called — stack size:', undoStack.length);
   if(!undoStack.length)return;
+  _pitchSlDragging=false;
   notes=undoStack.pop();
   console.log('[UNDO] restored — tuneOffsets:', notes.map(n=>n.tuneOffset.toFixed(2)));
   if(!undoStack.length) document.getElementById('undo-btn').disabled=true;
@@ -1969,6 +1970,7 @@ function resetQSlider(){
   notes.forEach(n=>{ delete n.quantizeBase; delete n.midiAtBase; delete n.gridTarget; });
 }
 function showNotePanel(n){
+  _pitchSlDragging=false;
   npEmpty.style.display='none';
   npMulti.style.display='none';
   npControls.style.display='flex';
@@ -2166,9 +2168,13 @@ function updateNoteCents(n){
 }
 
 // pitch slider input
+npPitchSl.addEventListener('pointerdown',()=>{
+  if(!selectedNote)return;
+  // Only snapshot once per note-selection (reset in showNotePanel)
+  if(!_pitchSlDragging){ pushUndo(); _pitchSlDragging=true; }
+},{passive:true});
 npPitchSl.oninput=()=>{
   if(!selectedNote)return;
-  if(!_pitchSlDragging){ pushUndo(); _pitchSlDragging=true; }
   const cents=parseInt(npPitchSl.value);
   selectedNote.tuneOffset=cents/100;
   updateNoteCents(selectedNote);
@@ -2183,7 +2189,6 @@ npPitchSl.oninput=()=>{
 };
 npPitchSl.onchange=()=>{
   if(!selectedNote)return;
-  _pitchSlDragging=false;
   rebuildCorrectedBuffer();
   playNote(selectedNote);
   refreshNoteList();
