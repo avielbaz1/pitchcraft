@@ -69,6 +69,7 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--sans);height:
 .t-btn{width:36px;height:36px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .13s;flex-shrink:0}
 .t-btn:hover{background:var(--s2)}
 .t-btn.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.t-btn:disabled{opacity:.3;cursor:default}
 .t-btn svg{width:16px;height:16px;fill:currentColor}
 .bypass-btn{font-size:11px;font-family:var(--mono);padding:0 12px;height:36px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;transition:all .13s;flex-shrink:0}
 .bypass-btn.on{background:var(--amber);border-color:var(--amber);color:#000}
@@ -233,7 +234,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
       <div class="note-panel-header">
         <span class="np-multi-header">Multi-select</span>
         <span class="np-multi-count" id="np-multi-count">0 notes</span>
-        <button class="np-multi-btn accent" id="np-multi-snap" style="margin-left:.5rem">snap all</button>
+        <button class="np-multi-btn accent" id="np-multi-snap" style="margin-left:.5rem">snap</button>
+        <button class="np-multi-btn accent" id="np-multi-merge" style="margin-left:.35rem">merge</button>
         <button class="np-close" id="np-multi-close" style="margin-left:auto">✕</button>
       </div>
       <div class="np-row">
@@ -257,7 +259,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
         <span class="np-hz" id="np-hz">147Hz</span>
         <span class="np-cents" id="np-cents">+0¢</span>
         <button class="np-snap-btn" id="np-snap">snap</button>
-        <button class="np-snap-btn" id="np-merge" title="Merge with next note">merge→</button>
         <button class="np-snap-btn" id="np-split" title="Split note in half">split</button>
         <button class="np-close" id="np-close">✕</button>
       </div>
@@ -1297,6 +1298,7 @@ function drawEditor(){
   }
 }
 document.getElementById('undo-btn').onclick=()=>undo();
+document.getElementById('undo-btn').addEventListener('touchend',(e)=>{e.preventDefault();undo();},{passive:false});
 document.getElementById('reset-all-btn').onclick=()=>{
   if(!originalNotes.length)return;
   const sel=notes.filter(n=>n.selected);
@@ -1490,6 +1492,7 @@ edCanvas.addEventListener('touchstart',(e)=>{
 
 let _mobilePitchNote=null,_mobilePitchStartY=0,_mobilePitchStartOffset=0,_mobilePitchActive=false;
 let _pitchThrottle=0;
+let _pitchSlDragging=false;
 let _vertDragNote=null,_vertDragStartY=0,_vertDragStartOffset=0,_vertDragMoved=false;
 
 edCanvas.addEventListener('touchmove',(e)=>{
@@ -2018,6 +2021,35 @@ document.getElementById('np-multi-snap').onclick=()=>{
   drawEditor();
 };
 
+document.getElementById('np-multi-merge').onclick=()=>{
+  // Sort selected notes by start time, then merge them all into the first one
+  const sel=notes.filter(n=>n.selected).sort((a,b)=>a.startTime-b.startTime);
+  if(sel.length<2)return;
+  pushUndo();
+  const first=sel[0];
+  const last=sel[sel.length-1];
+  // Average of the original recorded pitches across all selected notes
+  const mergedOrig=sel.reduce((s,n)=>s+n.midiOrig,0)/sel.length;
+  first.endTime=last.endTime;
+  first.endSample=last.endSample;
+  first.midiOrig=mergedOrig;
+  first.tuneOffset=0;
+  first.midi=mergedOrig;
+  first.freq=midi2f(mergedOrig);
+  first.cents=Math.round((mergedOrig-snapMidi(mergedOrig))*100);
+  first.preventMerge=false;
+  // Remove all the other selected notes
+  const toRemove=new Set(sel.slice(1));
+  notes=notes.filter(n=>!toRemove.has(n));
+  // Select the merged note
+  notes.forEach(n=>n.selected=false);
+  first.selected=true;
+  selectedNote=first;
+  showNotePanel(first);
+  rebuildCorrectedBuffer();
+  drawEditor();
+};
+
 // Multi pitch slider — relative offset applied to all selected notes
 const npmPitchSl=document.getElementById('npm-pitch-sl');
 const npmPitchVal=document.getElementById('npm-pitch-val');
@@ -2133,13 +2165,13 @@ function updateNoteCents(n){
 // pitch slider input
 npPitchSl.oninput=()=>{
   if(!selectedNote)return;
+  if(!_pitchSlDragging){ pushUndo(); _pitchSlDragging=true; }
   const cents=parseInt(npPitchSl.value);
   selectedNote.tuneOffset=cents/100;
   updateNoteCents(selectedNote);
   npPitchVal.textContent=(cents>0?'+':'')+cents+'¢';
   updateNotePanel(selectedNote);
   drawEditor();
-  // Live preview: play a short snippet from original buffer pitch-shifted on the fly
   const now=Date.now();
   if(now-_pitchThrottle>200){
     _pitchThrottle=now;
@@ -2148,10 +2180,11 @@ npPitchSl.oninput=()=>{
 };
 npPitchSl.onchange=()=>{
   if(!selectedNote)return;
+  _pitchSlDragging=false;
   rebuildCorrectedBuffer();
   playNote(selectedNote);
-  pushUndo();refreshNoteList();
-};
+  refreshNoteList();
+}
 
 // Lightweight preview: plays 400ms of the note from original buffer with Web Audio playbackRate
 // No WSOLA — just resampling. Fast enough for real-time feedback.
@@ -2183,47 +2216,31 @@ npVibSl.onchange=()=>{ if(selectedNote){ rebuildCorrectedBuffer(); drawEditor();
 // step buttons
 document.getElementById('np-pitch-dn').onclick=()=>{
   if(!selectedNote)return;
-  selectedNote.tuneOffset-=1; // 1 full semitone down
+  pushUndo();
+  selectedNote.tuneOffset-=1;
   updateNoteCents(selectedNote);
   updateNotePanel(selectedNote);
   rebuildCorrectedBuffer();refreshNoteList();playNote(selectedNote);drawEditor();
 };
 document.getElementById('np-pitch-up').onclick=()=>{
   if(!selectedNote)return;
-  selectedNote.tuneOffset+=1; // 1 full semitone up
+  pushUndo();
+  selectedNote.tuneOffset+=1;
   updateNoteCents(selectedNote);
   updateNotePanel(selectedNote);
   rebuildCorrectedBuffer();refreshNoteList();playNote(selectedNote);drawEditor();
 };
 document.getElementById('np-vib-dn').onclick=()=>{
   if(!selectedNote)return;
+  pushUndo();
   selectedNote.vibratoReduction=Math.max(0,(selectedNote.vibratoReduction||0)-10);
   updateNotePanel(selectedNote);rebuildCorrectedBuffer();
 };
 document.getElementById('np-vib-up').onclick=()=>{
   if(!selectedNote)return;
+  pushUndo();
   selectedNote.vibratoReduction=Math.min(100,(selectedNote.vibratoReduction||0)+10);
   updateNotePanel(selectedNote);rebuildCorrectedBuffer();
-};
-document.getElementById('np-merge').onclick=()=>{
-  if(!selectedNote)return;
-  const idx=notes.indexOf(selectedNote);
-  if(idx<0||idx>=notes.length-1)return;
-  pushUndo();
-  const next=notes[idx+1];
-  // merge selectedNote with next note — take the average of the true recorded pitches
-  const mergedOrig=(selectedNote.midiOrig+next.midiOrig)/2;
-  selectedNote.endTime=next.endTime;
-  selectedNote.endSample=next.endSample;
-  selectedNote.midiOrig=mergedOrig;
-  selectedNote.tuneOffset=0;          // reset any prior correction — user can re-snap
-  selectedNote.midi=mergedOrig;       // midi = midiOrig + 0
-  selectedNote.freq=midi2f(mergedOrig);
-  selectedNote.cents=Math.round((mergedOrig-snapMidi(mergedOrig))*100);
-  notes.splice(idx+1,1);
-  updateNotePanel(selectedNote);
-  rebuildCorrectedBuffer();
-  drawEditor();
 };
 // Analyze the actual audio in a given sample range and return the median MIDI pitch.
 // Skips the first 15% of the range (attack/portamento) for stability.
