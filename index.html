@@ -1299,30 +1299,24 @@ function drawEditor(){
 }
 document.getElementById('undo-btn').onclick=()=>{console.log('UNDO clicked');undo();};
 document.getElementById('reset-all-btn').onclick=()=>{
-  console.log('RESET clicked, originalNotes:', originalNotes.length, 'undoStack:', undoStack.length);
   if(!originalNotes.length)return;
   const sel=notes.filter(n=>n.selected);
   const resetAll=sel.length===0;
 
-  pushUndo();
-
   if(resetAll){
     notes=originalNotes.map(n=>({...n}));
-    undoStack=[];
-    document.getElementById('undo-btn').disabled=true;
-    updateMidiRange();
   } else {
-    // Collect originalStartSamples of selected notes
     const selOriginals=new Set(sel.map(n=>n.originalStartSample??n.startSample));
-    // Remove all current notes that share an originalStartSample with selected
     notes=notes.filter(n=>!selOriginals.has(n.originalStartSample??n.startSample));
-    // Re-insert the original note for each matched originalStartSample
     selOriginals.forEach(oss=>{
       const orig=originalNotes.find(o=>(o.originalStartSample??o.startSample)===oss);
       if(orig) notes.push({...orig});
     });
     notes.sort((a,b)=>a.startTime-b.startTime);
   }
+  undoStack=[];
+  document.getElementById('undo-btn').disabled=true;
+  updateMidiRange();
 
   const savedOffset=playOffset;
   const savedScroll=edScroll.scrollLeft;  // save BEFORE initEditorCanvas resets it
