@@ -1300,22 +1300,9 @@ function drawEditor(){
 document.getElementById('undo-btn').onclick=()=>{console.log('UNDO clicked');undo();};
 document.getElementById('reset-all-btn').onclick=()=>{
   if(!originalNotes.length)return;
-  const sel=notes.filter(n=>n.selected);
-  const resetAll=sel.length===0;
-
-  if(resetAll){
-    notes=originalNotes.map(n=>({...n}));
-  } else {
-    const selOriginals=new Set(sel.map(n=>n.originalStartSample??n.startSample));
-    notes=notes.filter(n=>!selOriginals.has(n.originalStartSample??n.startSample));
-    selOriginals.forEach(oss=>{
-      const orig=originalNotes.find(o=>(o.originalStartSample??o.startSample)===oss);
-      if(orig) notes.push({...orig});
-    });
-    notes.sort((a,b)=>a.startTime-b.startTime);
-  }
   undoStack=[];
   document.getElementById('undo-btn').disabled=true;
+  notes=originalNotes.map(n=>({...n}));
   updateMidiRange();
 
   const savedOffset=playOffset;
@@ -1479,14 +1466,15 @@ edCanvas.addEventListener('touchstart',(e)=>{
     _mobilePitchStartY=t.clientY;
     _mobilePitchStartOffset=hit.tuneOffset;
     _mobilePitchActive=false;
+    _mobilePitchUndoPushed=false;
   } else {
     _mobilePitchNote=null;
   }
 },{passive:true});
 
-let _mobilePitchNote=null,_mobilePitchStartY=0,_mobilePitchStartOffset=0,_mobilePitchActive=false;
+let _mobilePitchNote=null,_mobilePitchStartY=0,_mobilePitchStartOffset=0,_mobilePitchActive=false,_mobilePitchUndoPushed=false;
 let _pitchThrottle=0;
-let _vertDragNote=null,_vertDragStartY=0,_vertDragStartOffset=0,_vertDragMoved=false;
+let _vertDragNote=null,_vertDragStartY=0,_vertDragStartOffset=0,_vertDragMoved=false,_vertDragUndoPushed=false;
 
 edCanvas.addEventListener('touchmove',(e)=>{
   if(pinchActive&&e.touches.length>=2){
@@ -1514,6 +1502,13 @@ edCanvas.addEventListener('touchmove',(e)=>{
       tapMoved=true;
     }
     if(_mobilePitchActive){
+      if(!_mobilePitchUndoPushed){
+        const cur=_mobilePitchNote.tuneOffset;
+        _mobilePitchNote.tuneOffset=_mobilePitchStartOffset;
+        pushUndo();
+        _mobilePitchNote.tuneOffset=cur;
+        _mobilePitchUndoPushed=true;
+      }
       e.preventDefault();
       // ROW_H px = 1 semitone = 100 cents
       const centsDelta=-Math.round(dy/(ROW_H/100));
@@ -1538,8 +1533,9 @@ edCanvas.addEventListener('touchend',(e)=>{
     _mobilePitchActive=false;
     rebuildCorrectedBuffer();
     playNote(_mobilePitchNote);
-    pushUndo();refreshNoteList();
+    refreshNoteList();
     _mobilePitchNote=null;
+    _mobilePitchUndoPushed=false;
     return;
   }
   _mobilePitchNote=null;
@@ -1790,6 +1786,7 @@ edCanvas.addEventListener('mousedown',(e)=>{
     _vertDragStartY=e.clientY;
     _vertDragStartOffset=hit.tuneOffset;
     _vertDragMoved=false;
+    _vertDragUndoPushed=false;
     dragSelStartClientX=e.clientX;dragSelStartClientY=e.clientY;
     // Select note on mousedown
     if(!e.shiftKey){notes.forEach(n=>n.selected=false);}
@@ -1819,9 +1816,19 @@ edScroll.addEventListener('wheel',(e)=>{
 window.addEventListener('mousemove',(e)=>{
   // ── Vertical pitch drag ──
   if(_vertDragNote){
+    // Cancel if mouse button released outside window
+    if(e.buttons===0){ _vertDragNote=null; _vertDragMoved=false; _vertDragUndoPushed=false; edCanvas.style.cursor='crosshair'; return; }
     const dy=e.clientY-_vertDragStartY;
     if(Math.abs(dy)>3) _vertDragMoved=true;
     if(_vertDragMoved){
+      if(!_vertDragUndoPushed){
+        // Snapshot BEFORE change: temporarily restore original offset
+        const cur=_vertDragNote.tuneOffset;
+        _vertDragNote.tuneOffset=_vertDragStartOffset;
+        pushUndo();
+        _vertDragNote.tuneOffset=cur;
+        _vertDragUndoPushed=true;
+      }
       // ROW_H pixels = 1 semitone
       const semDelta=-(dy/ROW_H);
       const newOffset=Math.max(-4,Math.min(4,_vertDragStartOffset+semDelta));
@@ -1856,11 +1863,10 @@ window.addEventListener('mouseup',(e)=>{
   // ── Commit vertical pitch drag ──
   if(_vertDragNote){
     if(_vertDragMoved){
-      pushUndo();
       rebuildCorrectedBuffer();
       refreshNoteList();
     }
-    _vertDragNote=null; _vertDragMoved=false;
+    _vertDragNote=null; _vertDragMoved=false; _vertDragUndoPushed=false;
     edCanvas.style.cursor='crosshair';
     return;
   }
