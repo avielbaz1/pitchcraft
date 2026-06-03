@@ -638,16 +638,11 @@ function pushUndo(){
   undoStack.push(notes.map(n=>({...n})));
   if(undoStack.length>30) undoStack.shift();// max 30 steps
   document.getElementById('undo-btn').disabled=false;
-  console.log('[UNDO] pushUndo — stack size:', undoStack.length, '| caller:', new Error().stack.split('\n')[2]);
 }
 
 function undo(){
-  console.log('[UNDO] undo called — stack size:', undoStack.length);
   if(!undoStack.length)return;
-  _pitchSlDragging=false;
-  _vibSlDragging=false;
   notes=undoStack.pop();
-  console.log('[UNDO] restored — tuneOffsets:', notes.map(n=>n.tuneOffset.toFixed(2)));
   if(!undoStack.length) document.getElementById('undo-btn').disabled=true;
   notes.forEach(n=>n.selected=false);
   selectedNote=null;
@@ -1302,27 +1297,14 @@ function drawEditor(){
     ec.setLineDash([]);
   }
 }
-document.getElementById('undo-btn').onclick=()=>undo();
-document.getElementById('undo-btn').addEventListener('touchend',(e)=>{
-  if(e.cancelable) e.preventDefault();
-  // Only fire if touch ended on this button
-  const r=e.currentTarget.getBoundingClientRect();
-  const t=e.changedTouches[0];
-  if(t.clientX>=r.left&&t.clientX<=r.right&&t.clientY>=r.top&&t.clientY<=r.bottom) undo();
-},{passive:false});
-document.getElementById('reset-all-btn').addEventListener('touchend',(e)=>{
-  if(e.cancelable) e.preventDefault();
-  const r=e.currentTarget.getBoundingClientRect();
-  const t=e.changedTouches[0];
-  if(t.clientX>=r.left&&t.clientX<=r.right&&t.clientY>=r.top&&t.clientY<=r.bottom) e.currentTarget.onclick();
-},{passive:false});
+document.getElementById('undo-btn').onclick=()=>{console.log('UNDO clicked');undo();};
 document.getElementById('reset-all-btn').onclick=()=>{
-  console.log('[RESET] clicked, originalNotes:', originalNotes.length, 'undoStack:', undoStack.length);
+  console.log('RESET clicked, originalNotes:', originalNotes.length, 'undoStack:', undoStack.length);
   if(!originalNotes.length)return;
   const sel=notes.filter(n=>n.selected);
   const resetAll=sel.length===0;
 
-  if(!resetAll) pushUndo();
+  pushUndo();
 
   if(resetAll){
     notes=originalNotes.map(n=>({...n}));
@@ -1503,16 +1485,14 @@ edCanvas.addEventListener('touchstart',(e)=>{
     _mobilePitchStartY=t.clientY;
     _mobilePitchStartOffset=hit.tuneOffset;
     _mobilePitchActive=false;
-    _mobilePitchUndoPushed=false;
   } else {
     _mobilePitchNote=null;
   }
 },{passive:true});
 
-let _mobilePitchNote=null,_mobilePitchStartY=0,_mobilePitchStartOffset=0,_mobilePitchActive=false,_mobilePitchUndoPushed=false;
+let _mobilePitchNote=null,_mobilePitchStartY=0,_mobilePitchStartOffset=0,_mobilePitchActive=false;
 let _pitchThrottle=0;
-let _pitchSlDragging=false;
-let _vertDragNote=null,_vertDragStartY=0,_vertDragStartOffset=0,_vertDragMoved=false,_vertDragUndoPushed=false;
+let _vertDragNote=null,_vertDragStartY=0,_vertDragStartOffset=0,_vertDragMoved=false;
 
 edCanvas.addEventListener('touchmove',(e)=>{
   if(pinchActive&&e.touches.length>=2){
@@ -1540,7 +1520,6 @@ edCanvas.addEventListener('touchmove',(e)=>{
       tapMoved=true;
     }
     if(_mobilePitchActive){
-      if(!_mobilePitchUndoPushed){ pushUndo(); _mobilePitchUndoPushed=true; }
       e.preventDefault();
       // ROW_H px = 1 semitone = 100 cents
       const centsDelta=-Math.round(dy/(ROW_H/100));
@@ -1563,10 +1542,9 @@ edCanvas.addEventListener('touchmove',(e)=>{
 edCanvas.addEventListener('touchend',(e)=>{
   if(_mobilePitchActive&&_mobilePitchNote){
     _mobilePitchActive=false;
-    _mobilePitchUndoPushed=false;
     rebuildCorrectedBuffer();
     playNote(_mobilePitchNote);
-    refreshNoteList();
+    pushUndo();refreshNoteList();
     _mobilePitchNote=null;
     return;
   }
@@ -1815,11 +1793,9 @@ edCanvas.addEventListener('mousedown',(e)=>{
   if(hit){
     // Start vertical pitch drag on this note
     _vertDragNote=hit;
-    _vertDragUndoPushed=false;
     _vertDragStartY=e.clientY;
     _vertDragStartOffset=hit.tuneOffset;
     _vertDragMoved=false;
-    _vertDragUndoPushed=false;
     dragSelStartClientX=e.clientX;dragSelStartClientY=e.clientY;
     // Select note on mousedown
     if(!e.shiftKey){notes.forEach(n=>n.selected=false);}
@@ -1849,12 +1825,10 @@ edScroll.addEventListener('wheel',(e)=>{
 window.addEventListener('mousemove',(e)=>{
   // ── Vertical pitch drag ──
   if(_vertDragNote){
-    // If no mouse button is pressed, cancel the drag (mouseup was missed)
-    if(e.buttons===0){ _vertDragNote=null; _vertDragMoved=false; _vertDragUndoPushed=false; edCanvas.style.cursor='crosshair'; return; }
     const dy=e.clientY-_vertDragStartY;
     if(Math.abs(dy)>3) _vertDragMoved=true;
     if(_vertDragMoved){
-      if(!_vertDragUndoPushed){ pushUndo(); _vertDragUndoPushed=true; }
+      // ROW_H pixels = 1 semitone
       const semDelta=-(dy/ROW_H);
       const newOffset=Math.max(-4,Math.min(4,_vertDragStartOffset+semDelta));
       _vertDragNote.tuneOffset=newOffset;
@@ -1888,13 +1862,15 @@ window.addEventListener('mouseup',(e)=>{
   // ── Commit vertical pitch drag ──
   if(_vertDragNote){
     if(_vertDragMoved){
+      pushUndo();
       rebuildCorrectedBuffer();
       refreshNoteList();
     }
-    _vertDragNote=null; _vertDragMoved=false; _vertDragUndoPushed=false;
+    _vertDragNote=null; _vertDragMoved=false;
     edCanvas.style.cursor='crosshair';
     return;
   }
+  if(!rbMouseActive)return;
   rbMouseActive=false;
   dragSelActive=false;
   // Restore scroll
@@ -1917,17 +1893,6 @@ window.addEventListener('mouseup',(e)=>{
     refreshSelectionPanel();
   }
   drawEditor();
-});
-
-// Clean up drag state if pointer leaves window mid-drag
-window.addEventListener('pointercancel',()=>{
-  if(_vertDragNote){ _vertDragNote=null; _vertDragMoved=false; _vertDragUndoPushed=false; edCanvas.style.cursor='crosshair'; }
-});
-window.addEventListener('blur',()=>{
-  if(_vertDragNote){ _vertDragNote=null; _vertDragMoved=false; _vertDragUndoPushed=false; edCanvas.style.cursor='crosshair'; }
-});
-edCanvas.addEventListener('mouseleave',()=>{
-  if(_vertDragNote&&!_vertDragMoved){ _vertDragNote=null; _vertDragUndoPushed=false; edCanvas.style.cursor='crosshair'; }
 });
 
 // ── Rubber-band touch (two-finger already handled as pinch; single-finger long-press → drag-select) ──
@@ -2000,8 +1965,6 @@ function resetQSlider(){
   notes.forEach(n=>{ delete n.quantizeBase; delete n.midiAtBase; delete n.gridTarget; });
 }
 function showNotePanel(n){
-  _pitchSlDragging=false;
-  _vibSlDragging=false;
   npEmpty.style.display='none';
   npMulti.style.display='none';
   npControls.style.display='flex';
@@ -2053,40 +2016,6 @@ document.getElementById('np-multi-snap').onclick=()=>{
     n.midi=n.midiOrig+n.tuneOffset;
     updateNoteCents(n);
   });
-  rebuildCorrectedBuffer();
-  drawEditor();
-};
-
-document.getElementById('np-multi-merge').onclick=()=>{
-  // Sort selected notes by start time, then merge them all into the first one
-  const sel=notes.filter(n=>n.selected).sort((a,b)=>a.startTime-b.startTime);
-  if(sel.length<2)return;
-  pushUndo();
-  const first=sel[0];
-  const last=sel[sel.length-1];
-  // Average of the original recorded pitches across all selected notes
-  const mergedOrig=sel.reduce((s,n)=>s+n.midiOrig,0)/sel.length;
-  first.endTime=last.endTime;
-  first.endSample=last.endSample;
-  first.midiOrig=mergedOrig;
-  // Keep existing tuneOffset so pitch doesn't jump
-  first.midi=mergedOrig+first.tuneOffset;
-  first.freq=midi2f(first.midi);
-  first.cents=Math.round((first.midi-snapMidi(first.midi))*100);
-  first.preventMerge=false;
-  // Remove all the other selected notes
-  const toRemove=new Set(sel.slice(1));
-  notes=notes.filter(n=>!toRemove.has(n));
-  // Recalculate displayEnd for all notes
-  for(let i=0;i<notes.length;i++){
-    const nx=notes[i+1];
-    notes[i].displayEnd=nx?Math.min(notes[i].endTime,nx.startTime-0.002):notes[i].endTime;
-  }
-  // Select the merged note
-  notes.forEach(n=>n.selected=false);
-  first.selected=true;
-  selectedNote=first;
-  showNotePanel(first);
   rebuildCorrectedBuffer();
   drawEditor();
 };
@@ -2204,11 +2133,6 @@ function updateNoteCents(n){
 }
 
 // pitch slider input
-npPitchSl.addEventListener('pointerdown',()=>{
-  if(!selectedNote)return;
-  // Only snapshot once per note-selection (reset in showNotePanel)
-  if(!_pitchSlDragging){ pushUndo(); _pitchSlDragging=true; }
-},{passive:true});
 npPitchSl.oninput=()=>{
   if(!selectedNote)return;
   const cents=parseInt(npPitchSl.value);
@@ -2217,6 +2141,7 @@ npPitchSl.oninput=()=>{
   npPitchVal.textContent=(cents>0?'+':'')+cents+'¢';
   updateNotePanel(selectedNote);
   drawEditor();
+  // Live preview: play a short snippet from original buffer pitch-shifted on the fly
   const now=Date.now();
   if(now-_pitchThrottle>200){
     _pitchThrottle=now;
@@ -2227,8 +2152,8 @@ npPitchSl.onchange=()=>{
   if(!selectedNote)return;
   rebuildCorrectedBuffer();
   playNote(selectedNote);
-  refreshNoteList();
-}
+  pushUndo();refreshNoteList();
+};
 
 // Lightweight preview: plays 400ms of the note from original buffer with Web Audio playbackRate
 // No WSOLA — just resampling. Fast enough for real-time feedback.
@@ -2249,51 +2174,65 @@ function _previewNote(n){
 }
 
 // vibrato slider input
-let _vibSlDragging=false;
-npVibSl.addEventListener('pointerdown',()=>{
-  if(!selectedNote)return;
-  if(!_vibSlDragging){ pushUndo(); _vibSlDragging=true; }
-},{passive:true});
 npVibSl.oninput=()=>{
   if(!selectedNote)return;
   selectedNote.vibratoReduction=parseInt(npVibSl.value);
   npVibVal.textContent=selectedNote.vibratoReduction+'%';
   drawEditor(); // update pitch graph in real time
 };
-npVibSl.onchange=()=>{
-  if(!selectedNote)return;
-  _vibSlDragging=false;
-  rebuildCorrectedBuffer(); drawEditor();
-};
+npVibSl.onchange=()=>{ if(selectedNote){ rebuildCorrectedBuffer(); drawEditor(); } };
 
 // step buttons
 document.getElementById('np-pitch-dn').onclick=()=>{
   if(!selectedNote)return;
-  pushUndo();
-  selectedNote.tuneOffset-=1;
+  selectedNote.tuneOffset-=1; // 1 full semitone down
   updateNoteCents(selectedNote);
   updateNotePanel(selectedNote);
   rebuildCorrectedBuffer();refreshNoteList();playNote(selectedNote);drawEditor();
 };
 document.getElementById('np-pitch-up').onclick=()=>{
   if(!selectedNote)return;
-  pushUndo();
-  selectedNote.tuneOffset+=1;
+  selectedNote.tuneOffset+=1; // 1 full semitone up
   updateNoteCents(selectedNote);
   updateNotePanel(selectedNote);
   rebuildCorrectedBuffer();refreshNoteList();playNote(selectedNote);drawEditor();
 };
 document.getElementById('np-vib-dn').onclick=()=>{
   if(!selectedNote)return;
-  pushUndo();
   selectedNote.vibratoReduction=Math.max(0,(selectedNote.vibratoReduction||0)-10);
   updateNotePanel(selectedNote);rebuildCorrectedBuffer();
 };
 document.getElementById('np-vib-up').onclick=()=>{
   if(!selectedNote)return;
-  pushUndo();
   selectedNote.vibratoReduction=Math.min(100,(selectedNote.vibratoReduction||0)+10);
   updateNotePanel(selectedNote);rebuildCorrectedBuffer();
+};
+document.getElementById('np-multi-merge').onclick=()=>{
+  const sel=notes.filter(n=>n.selected).sort((a,b)=>a.startTime-b.startTime);
+  if(sel.length<2)return;
+  pushUndo();
+  const first=sel[0];
+  const last=sel[sel.length-1];
+  const mergedOrig=sel.reduce((s,n)=>s+n.midiOrig,0)/sel.length;
+  first.endTime=last.endTime;
+  first.endSample=last.endSample;
+  first.midiOrig=mergedOrig;
+  first.midi=mergedOrig+first.tuneOffset;
+  first.freq=midi2f(first.midi);
+  first.cents=Math.round((first.midi-snapMidi(first.midi))*100);
+  first.preventMerge=false;
+  const toRemove=new Set(sel.slice(1));
+  notes=notes.filter(n=>!toRemove.has(n));
+  for(let i=0;i<notes.length;i++){
+    const nx=notes[i+1];
+    notes[i].displayEnd=nx?Math.min(notes[i].endTime,nx.startTime-0.002):notes[i].endTime;
+  }
+  notes.forEach(n=>n.selected=false);
+  first.selected=true;
+  selectedNote=first;
+  showNotePanel(first);
+  rebuildCorrectedBuffer();
+  drawEditor();
 };
 // Analyze the actual audio in a given sample range and return the median MIDI pitch.
 // Skips the first 15% of the range (attack/portamento) for stability.
@@ -2447,6 +2386,7 @@ function startQuantizeSession(){
 
 qSlider.addEventListener('pointerdown',startQuantizeSession);
 qSlider.addEventListener('touchstart',startQuantizeSession,{passive:true});
+qSlider.addEventListener('focus',startQuantizeSession);
 
 qSlider.oninput=()=>{
   qVal.textContent=qSlider.value+'%';
