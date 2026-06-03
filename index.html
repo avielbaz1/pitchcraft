@@ -638,7 +638,7 @@ function pushUndo(){
   undoStack.push(notes.map(n=>({...n})));
   if(undoStack.length>30) undoStack.shift();// max 30 steps
   document.getElementById('undo-btn').disabled=false;
-  console.log('[UNDO] pushUndo — stack size:', undoStack.length, '| top tuneOffsets:', undoStack[undoStack.length-1].map(n=>n.tuneOffset.toFixed(2)));
+  console.log('[UNDO] pushUndo — stack size:', undoStack.length, '| caller:', new Error().stack.split('\n')[2]);
 }
 
 function undo(){
@@ -1815,6 +1815,7 @@ edCanvas.addEventListener('mousedown',(e)=>{
   if(hit){
     // Start vertical pitch drag on this note
     _vertDragNote=hit;
+    _vertDragUndoPushed=false;
     _vertDragStartY=e.clientY;
     _vertDragStartOffset=hit.tuneOffset;
     _vertDragMoved=false;
@@ -1848,11 +1849,12 @@ edScroll.addEventListener('wheel',(e)=>{
 window.addEventListener('mousemove',(e)=>{
   // ── Vertical pitch drag ──
   if(_vertDragNote){
+    // If no mouse button is pressed, cancel the drag (mouseup was missed)
+    if(e.buttons===0){ _vertDragNote=null; _vertDragMoved=false; _vertDragUndoPushed=false; edCanvas.style.cursor='crosshair'; return; }
     const dy=e.clientY-_vertDragStartY;
     if(Math.abs(dy)>3) _vertDragMoved=true;
     if(_vertDragMoved){
       if(!_vertDragUndoPushed){ pushUndo(); _vertDragUndoPushed=true; }
-      // ROW_H pixels = 1 semitone
       const semDelta=-(dy/ROW_H);
       const newOffset=Math.max(-4,Math.min(4,_vertDragStartOffset+semDelta));
       _vertDragNote.tuneOffset=newOffset;
@@ -1893,7 +1895,6 @@ window.addEventListener('mouseup',(e)=>{
     edCanvas.style.cursor='crosshair';
     return;
   }
-  if(!rbMouseActive)return;
   rbMouseActive=false;
   dragSelActive=false;
   // Restore scroll
@@ -1916,6 +1917,17 @@ window.addEventListener('mouseup',(e)=>{
     refreshSelectionPanel();
   }
   drawEditor();
+});
+
+// Clean up drag state if pointer leaves window mid-drag
+window.addEventListener('pointercancel',()=>{
+  if(_vertDragNote){ _vertDragNote=null; _vertDragMoved=false; _vertDragUndoPushed=false; edCanvas.style.cursor='crosshair'; }
+});
+window.addEventListener('blur',()=>{
+  if(_vertDragNote){ _vertDragNote=null; _vertDragMoved=false; _vertDragUndoPushed=false; edCanvas.style.cursor='crosshair'; }
+});
+edCanvas.addEventListener('mouseleave',()=>{
+  if(_vertDragNote&&!_vertDragMoved){ _vertDragNote=null; _vertDragUndoPushed=false; edCanvas.style.cursor='crosshair'; }
 });
 
 // ── Rubber-band touch (two-finger already handled as pinch; single-finger long-press → drag-select) ──
@@ -2435,7 +2447,6 @@ function startQuantizeSession(){
 
 qSlider.addEventListener('pointerdown',startQuantizeSession);
 qSlider.addEventListener('touchstart',startQuantizeSession,{passive:true});
-qSlider.addEventListener('focus',startQuantizeSession);
 
 qSlider.oninput=()=>{
   qVal.textContent=qSlider.value+'%';
