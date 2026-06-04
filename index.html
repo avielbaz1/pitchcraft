@@ -904,7 +904,7 @@ let PX_PER_SEC=PX_PER_SEC_DEFAULT;
 // Zoom limits
 const ZOOM_X_MAX=600;   // max px/sec
 const ZOOM_X_MIN=20;    // min px/sec — allows zooming out to see full file
-const ZOOM_Y_MIN=14,ZOOM_Y_MAX=40;
+const ZOOM_Y_MIN=10,ZOOM_Y_MAX=90;
 let edH=0,edW=0;
 let selectedNote=null;   // last single-tapped note (single-select mode)
 let rafId=null;
@@ -1353,13 +1353,12 @@ document.getElementById('return-btn').onclick=()=>{
 document.getElementById('zoom-reset-btn').onclick=()=>resetZoom();
 document.getElementById('zoom-y-in').onclick=()=>{
   const anchor=edScroll.scrollTop+edScroll.clientHeight/2;
-  const midiAnchor=yToMidi(anchor+edScroll.scrollTop);
-  applyZoom(1,1.25,edScroll.scrollLeft+edScroll.clientWidth/2,anchor);
+  applyZoom(1,1.4,edScroll.scrollLeft+edScroll.clientWidth/2,anchor);
   drawEditor(); updateMinimap();
 };
 document.getElementById('zoom-y-out').onclick=()=>{
   const anchor=edScroll.scrollTop+edScroll.clientHeight/2;
-  applyZoom(1,0.8,edScroll.scrollLeft+edScroll.clientWidth/2,anchor);
+  applyZoom(1,0.72,edScroll.scrollLeft+edScroll.clientWidth/2,anchor);
   drawEditor(); updateMinimap();
 };
 function doBypass(){
