@@ -602,21 +602,15 @@ async function loadAudioFromUrl(urlOrBuffer,name){
   document.getElementById('proc-text').textContent='detecting notes...';
   document.getElementById('proc-bar').style.width='0%';
   document.getElementById('proc-pct').textContent='0%';
-  // Yield to browser so 0% renders, then run analysis
-  await new Promise(r=>setTimeout(r,80));
-  // Fake progressive bar during blocking analysis
-  let _fakePct=5;
-  const _fakeBarTimer=setInterval(()=>{
-    if(_fakePct<90){ _fakePct+=2; }
-    document.getElementById('proc-bar').style.width=_fakePct+'%';
-    document.getElementById('proc-pct').textContent=Math.round(_fakePct)+'%';
-  },300);
-  await new Promise(r=>setTimeout(r,0));
-  analyzeBuffer(originalBuffer,()=>{});
-  clearInterval(_fakeBarTimer);
+  await new Promise(r=>setTimeout(r,50));
+  await analyzeBuffer(originalBuffer,(p)=>{
+    const pct=Math.round(p*100);
+    document.getElementById('proc-bar').style.width=pct+'%';
+    document.getElementById('proc-pct').textContent=pct+'%';
+  });
   document.getElementById('proc-bar').style.width='100%';
   document.getElementById('proc-pct').textContent='100%';
-  await new Promise(r=>setTimeout(r,120));
+  await new Promise(r=>setTimeout(r,80));
   // Save a deep snapshot of the freshly-analysed notes for Reset All
   originalNotes=notes.map(n=>({...n}));
   // Reset quantize slider for the new recording — no leftover state from a previous session
@@ -736,13 +730,14 @@ function splitOnRmsDips(voicedFrames, HOP_MS) {
   return parts;
 }
 
-function analyzeBuffer(buf, onProgress) {
+async function analyzeBuffer(buf, onProgress) {
   const sr  = buf.sampleRate;
   const data = buf.getChannelData(0);
   const WIN = 4096, HOP = 512;
   const frames = [];
 
-  // Pass 1 — YIN pitch detection per frame
+  // Pass 1 — YIN pitch detection per frame (async chunks for UI progress)
+  const totalFrames = Math.floor((data.length - WIN) / HOP);
   for (let i = 0; i + WIN < data.length; i += HOP) {
     const sl = data.subarray(i, i + WIN);
     const { freq, rms } = detectPitch(sl, sr);
@@ -752,7 +747,11 @@ function analyzeBuffer(buf, onProgress) {
       midi:  freq > 0 ? f2midi(freq) : 0,
       voiced: freq > 0 && rms > 0.005, rms
     });
-    if (onProgress && frames.length % 80 === 0) onProgress(i / data.length * 0.9);
+    if (frames.length % 400 === 0) {
+      const p = i / data.length * 0.9;
+      if (onProgress) onProgress(p);
+      await new Promise(r=>setTimeout(r,0));
+    }
   }
 
   // Pass 2 — median smooth (vibrato suppression)
