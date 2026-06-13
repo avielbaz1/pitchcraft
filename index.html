@@ -62,7 +62,8 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--sans);height:
 .ed-top{display:flex;align-items:center;justify-content:space-between;padding:.75rem 1rem;background:var(--s1);border-bottom:1px solid var(--border);flex-shrink:0}
 .ed-title{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--text)}
 .ed-dur{font-family:var(--mono);font-size:11px;color:var(--muted)}
-.back-btn{font-size:12px;color:var(--accent);cursor:pointer;padding:4px 8px;border-radius:6px;border:1px solid rgba(91,138,245,.3);background:transparent}
+.back-btn{font-size:12px;font-weight:700;letter-spacing:.05em;color:#f87171;cursor:pointer;padding:5px 12px;border-radius:8px;border:1px solid rgba(248,113,113,.5);background:rgba(248,113,113,.1);text-shadow:0 0 8px rgba(248,113,113,.8);box-shadow:0 0 10px rgba(248,113,113,.2);transition:all .15s}
+.back-btn:hover{background:rgba(248,113,113,.2);box-shadow:0 0 16px rgba(248,113,113,.4)}
 
 /* transport */
 .transport{display:flex;align-items:center;gap:.4rem;padding:.6rem 1rem;background:var(--s1);border-bottom:1px solid var(--border);flex-shrink:0}
@@ -214,7 +215,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
 <!-- ══ SCREEN 3: EDITOR ══════════════════════════════════════ -->
 <div class="screen hidden" id="ed-screen">
   <div class="ed-top">
-    <span class="back-btn" id="back-btn">← new</span>
+    <span class="back-btn" id="back-btn">NEW</span>
     <span class="ed-title">PitchCraft</span>
     <div style="display:flex;align-items:center;gap:.6rem;margin-left:auto">
       <span class="playhead-time" id="ph-time">0:00.0</span>
@@ -337,11 +338,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
     <span id="q-val" style="display:none">0%</span>
       <button class="export-btn" id="export-btn" style="flex:1">↓ Export Audio</button>
       <button class="export-btn" id="export-video-btn" style="flex:1;background:var(--accent2);color:#fff">🎬 Export Video</button>
-    </div>
-    <div id="video-badge" style="display:none;margin-top:.4rem;padding:.35rem .65rem;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.3);border-radius:8px;font-size:11px;font-family:var(--mono);color:var(--accent2);align-items:center;gap:.5rem">
-      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="15" height="10" rx="2"/><path d="M17 9l5-3v12l-5-3"/></svg>
-      <span id="video-badge-name">video loaded</span>
-      <button onclick="clearVideo()" style="margin-left:auto;background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:12px;padding:0 2px">✕</button>
     </div>
   </div>
 </div>
@@ -543,11 +539,6 @@ document.getElementById('video-in').onchange=async(e)=>{
   const file=e.target.files[0];if(!file)return;
   videoSourceFile=file;
   videoSourceName=file.name;
-  // Show badge on record screen
-  const badge=document.getElementById('video-badge');
-  badge.style.display='flex';
-  badge.style.alignItems='center';
-  document.getElementById('video-badge-name').textContent=videoSourceName;
   showScreen('proc-screen');
   document.getElementById('proc-text').textContent='extracting audio from video...';
   try{
@@ -560,9 +551,7 @@ document.getElementById('video-in').onchange=async(e)=>{
 
 function clearVideo(){
   videoSourceFile=null;videoSourceName='';
-  document.getElementById('video-badge').style.display='none';
   document.getElementById('video-in').value='';
-  // export buttons always visible
 }
 
 // ══ AUDIO ENGINE ═════════════════════════════════════════════
@@ -3099,8 +3088,6 @@ document.getElementById('back-btn').onclick=()=>{
   if(document.getElementById('nr-val')) document.getElementById('nr-val').textContent='0%';
   allChunks=[];chunkCount=0;
   videoSourceFile=null;videoSourceName='';
-  document.getElementById('video-badge').style.display='none';
-  // export buttons always visible
   recTimer.textContent='';
   recStatus.textContent='tap to record';
   showScreen('rec-screen');
