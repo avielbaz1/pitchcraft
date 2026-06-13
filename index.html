@@ -97,6 +97,7 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--sans);height:
 
 /* piano roll + editor canvas */
 .editor-wrap{flex:1;display:flex;overflow:hidden;position:relative}
+#piano-sidebar{width:36px;flex-shrink:0;display:block;cursor:default;z-index:2}
 .editor-scroll{flex:1;overflow:auto;position:relative;cursor:crosshair}
 #ed-canvas{display:block;cursor:crosshair}
 
@@ -255,6 +256,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
   </div>
 
   <div class="editor-wrap">
+    <canvas id="piano-sidebar"></canvas>
     <div class="editor-scroll" id="ed-scroll">
       <canvas id="ed-canvas"></canvas>
     </div>
@@ -1260,7 +1262,6 @@ function drawEditor(){
   const totalH=MIDI_RANGE*ROW_H;
   // Clear the FULL canvas (not just totalH) to avoid stale pixels after zoom/reset
   ec.clearRect(0,0,edCanvas.width,edCanvas.height);
-
   // ── background grid ──
   for(let m=MIDI_MIN;m<MIDI_MAX;m++){
     const y=midiToY(m);
@@ -1333,6 +1334,7 @@ function drawEditor(){
     ec.strokeRect(rx,ry,rw,rh);
     ec.setLineDash([]);
   }
+  drawPiano();
 }
 document.getElementById('undo-btn').onclick=()=>{console.log('UNDO clicked');undo();};
 document.getElementById('reset-all-btn').onclick=()=>{
@@ -2373,7 +2375,86 @@ document.getElementById('np-close').onclick=()=>{
   selectedNote=null;hideNotePanel();drawEditor();
 };
 
-// ══ QUANTIZE SLIDER ══════════════════════════════════════════
+// ── Piano sidebar ──────────────────────────────────────────────
+const pianoSidebar=document.getElementById('piano-sidebar');
+const pc=pianoSidebar.getContext('2d');
+const PIANO_W=36;
+
+function drawPiano(){
+  if(!edH) return;
+  const totalH=MIDI_RANGE*ROW_H;
+  pianoSidebar.width=PIANO_W;
+  pianoSidebar.height=edH;
+  pc.clearRect(0,0,PIANO_W,edH);
+
+  // Background
+  pc.fillStyle='#0e0e1a';
+  pc.fillRect(0,0,PIANO_W,edH);
+
+  // Right border line
+  pc.strokeStyle='rgba(255,255,255,0.12)';
+  pc.lineWidth=1;
+  pc.beginPath();pc.moveTo(PIANO_W-0.5,0);pc.lineTo(PIANO_W-0.5,edH);pc.stroke();
+
+  const scrollTop=edScroll.scrollTop;
+
+  for(let m=MIDI_MIN;m<MIDI_MAX;m++){
+    const y=midiToY(m)-scrollTop;
+    if(y+ROW_H<0||y>edH) continue;
+
+    const note=NOTES[((m%12)+12)%12];
+    const isBlack=note.includes('#');
+    const octave=Math.floor(m/12)-1;
+    const isC=note==='C';
+
+    // Row background
+    pc.fillStyle=isBlack?'rgba(0,0,0,0.35)':'rgba(255,255,255,0.04)';
+    pc.fillRect(0,y,PIANO_W-1,ROW_H);
+
+    // C marker line
+    if(isC){
+      pc.strokeStyle='rgba(255,255,255,0.2)';
+      pc.lineWidth=1;
+      pc.beginPath();pc.moveTo(0,y);pc.lineTo(PIANO_W-1,y);pc.stroke();
+    }
+
+    // Note label — only if row is tall enough
+    if(ROW_H>=14){
+      const label=isC?note+octave:note;
+      pc.font=`${isC?700:500} ${Math.min(10,ROW_H*0.55)}px var(--mono, monospace)`;
+      pc.textAlign='center';
+      pc.textBaseline='middle';
+      // Glowing colors per note group
+      const noteColors={
+        'C':'#60a5fa','C#':'#818cf8',
+        'D':'#34d399','D#':'#2dd4bf',
+        'E':'#f472b6',
+        'F':'#fb923c','F#':'#f59e0b',
+        'G':'#a78bfa','G#':'#c084fc',
+        'A':'#38bdf8','A#':'#22d3ee',
+        'B':'#f87171'
+      };
+      const col=noteColors[note]||'#fff';
+      // Glow effect
+      pc.shadowColor=col;
+      pc.shadowBlur=isC?8:4;
+      pc.fillStyle=isC?col:col+'cc';
+      pc.fillText(label,PIANO_W/2-1,y+ROW_H/2);
+      pc.shadowBlur=0;
+    }
+  }
+}
+
+// Redraw piano on scroll
+edScroll.addEventListener('scroll',()=>drawPiano(),{passive:true});
+
+const _origBuildEditor=buildEditor;
+function buildEditor(){
+  _origBuildEditor();
+  drawPiano();
+}
+
+
 const qSlider=document.getElementById('q-slider');
 const qVal=document.getElementById('q-val');
 
