@@ -270,6 +270,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
         <span class="np-multi-header">Multi-select</span>
         <span class="np-multi-count" id="np-multi-count">0 notes</span>
         <button class="np-multi-btn accent" id="np-multi-merge" style="margin-left:.35rem">merge</button>
+        <button class="np-multi-btn" id="np-multi-delete" style="margin-left:.35rem;border-color:var(--red);color:var(--red)">delete</button>
         <button class="np-close" id="np-multi-close" style="margin-left:auto">✕</button>
       </div>
       <div class="np-row">
@@ -293,6 +294,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
         <span class="np-hz" id="np-hz">147Hz</span>
         <span class="np-cents" id="np-cents">+0¢</span>
         <button class="np-snap-btn" id="np-split" title="Split note in half">split</button>
+        <button class="np-snap-btn" id="np-delete" title="Delete note" style="border-color:var(--red);color:var(--red)">delete</button>
         <button class="np-close" id="np-close">✕</button>
       </div>
       <div class="np-row">
@@ -2241,6 +2243,24 @@ document.getElementById('np-vib-up').onclick=()=>{
   selectedNote.vibratoReduction=Math.min(100,(selectedNote.vibratoReduction||0)+10);
   updateNotePanel(selectedNote);rebuildCorrectedBuffer();
 };
+document.getElementById('np-multi-delete').onclick=()=>{
+  const sel=notes.filter(n=>n.selected);
+  if(!sel.length)return;
+  pushUndo();
+  const toRemove=new Set(sel);
+  notes=notes.filter(n=>!toRemove.has(n));
+  notes.forEach(n=>n.selected=false);
+  selectedNote=null;
+  hideNotePanel();
+  updateMidiRange();
+  for(let i=0;i<notes.length;i++){
+    const nx=notes[i+1];
+    notes[i].displayEnd=nx?Math.min(notes[i].endTime,nx.startTime-0.002):notes[i].endTime;
+  }
+  rebuildCorrectedBuffer();
+  drawEditor();
+};
+
 document.getElementById('np-multi-merge').onclick=()=>{
   const sel=notes.filter(n=>n.selected).sort((a,b)=>a.startTime-b.startTime);
   if(sel.length<2)return;
@@ -2368,6 +2388,22 @@ document.getElementById('snap-all-btn').onclick=()=>{
   if(selectedNote) updateNotePanel(selectedNote);
   rebuildCorrectedBuffer();refreshNoteList();drawEditor();
   if(selectedNote) playNote(selectedNote);
+};
+
+document.getElementById('np-delete').onclick=()=>{
+  if(!selectedNote)return;
+  pushUndo();
+  notes=notes.filter(n=>n!==selectedNote);
+  selectedNote=null;
+  hideNotePanel();
+  updateMidiRange();
+  // Recalculate displayEnd for remaining notes
+  for(let i=0;i<notes.length;i++){
+    const nx=notes[i+1];
+    notes[i].displayEnd=nx?Math.min(notes[i].endTime,nx.startTime-0.002):notes[i].endTime;
+  }
+  rebuildCorrectedBuffer();
+  drawEditor();
 };
 
 document.getElementById('np-close').onclick=()=>{
