@@ -385,10 +385,10 @@ function detectPitch(buf, sr) {
   let rms = 0; for (let i = 0; i < n; i++) rms += buf[i]*buf[i]; rms = Math.sqrt(rms/n);
   if (rms < 0.005) return { freq: -1, rms };
 
-  const minP = Math.floor(sr / 1100);
-  const maxP = Math.min(Math.ceil(sr / 38), Math.floor(n / 2));
+  const minP = Math.floor(sr / 1100); // max ~1100Hz — covers soprano
+  const maxP = Math.min(Math.ceil(sr / 60), Math.floor(n / 2)); // min 60Hz
 
-  // 1. Difference function + CMND
+  // 1. Difference function (CMND/YIN)
   const diff = new Float32Array(maxP + 1);
   const sos  = new Float32Array(n + 1);
   for (let i = 0; i < n; i++) sos[i+1] = sos[i] + buf[i]*buf[i];
@@ -404,72 +404,54 @@ function detectPitch(buf, sr) {
     cmnd[tau] = run === 0 ? 1 : diff[tau] / ((1/tau) * run);
   }
 
-  // 2. Collect ALL dips as pitch candidates
-  const THR = 0.20;
-  const dips = [];
-  for (let tau = minP+1; tau < maxP; tau++)
-    if (cmnd[tau] < cmnd[tau-1] && cmnd[tau] < cmnd[tau+1])
-      dips.push({ tau, val: cmnd[tau] });
-
-  if (!dips.length) {
-    let mv = 1, bi = -1;
-    for (let tau = minP; tau <= maxP; tau++) if (cmnd[tau] < mv) { mv = cmnd[tau]; bi = tau; }
-    if (mv > 0.5 || bi < 0) return { freq: -1, rms };
-    dips.push({ tau: bi, val: mv });
-  }
-
-  // 3. Parabolic refinement for each candidate
-  const cands = dips.filter(d => d.val < THR).slice(0, 8);
-  if (!cands.length) cands.push(dips.reduce((a,b) => b.val < a.val ? b : a));
-
-  const refined = cands.map(d => {
-    let tau = d.tau;
-    if (tau > minP && tau < maxP) {
-      const v1=cmnd[tau-1], v2=cmnd[tau], v3=cmnd[tau+1];
-      const den = v1 - 2*v2 + v3;
-      if (Math.abs(den) > 1e-6) tau += 0.5*(v1-v3)/den;
+  // 2. Find FIRST dip below threshold — smallest tau = highest plausible freq
+  // This is the classic YIN approach: scan from small tau upward
+  const THR = 0.18;
+  let bestTau = -1, bestVal = 1;
+  for (let tau = minP + 1; tau < maxP - 1; tau++) {
+    if (cmnd[tau] < cmnd[tau-1] && cmnd[tau] <= cmnd[tau+1]) {
+      if (cmnd[tau] < THR) { bestTau = tau; bestVal = cmnd[tau]; break; }
+      if (cmnd[tau] < bestVal) { bestVal = cmnd[tau]; bestTau = tau; }
     }
-    return { tau, val: d.val, freq: sr/tau };
-  }).filter(c => c.freq >= 38 && c.freq <= 1100);
-
-  if (!refined.length) return { freq: -1, rms };
-
-  // 4. Octave disambiguation — prefer LOWEST credible octave.
-  // Sort candidates by frequency (ascending) and pick lowest that has good CMND.
-  refined.sort((a,b) => a.freq - b.freq);
-  let best = refined[0];
-
-  // Walk candidates from lowest to highest frequency.
-  // Accept a higher candidate only if it's significantly better CMND AND
-  // its sub-harmonic (octave below) is NOT also a credible candidate.
-  for (const c of refined) {
-    if (c === best) continue;
-    // Is there a credible sub-harmonic for c? (means c is probably an overtone)
-    const subTauC = Math.round(c.tau * 2);
-    const subValC = subTauC <= maxP ? cmnd[subTauC] : 1;
-    const hasSubHarm = subValC < 0.40;
-    if (hasSubHarm) continue; // c is likely an overtone, skip it
-    // c is credible only if much better CMND than best
-    if (c.val < best.val * 0.6) best = c;
+  }
+  if (bestTau < 0) {
+    // fallback: global minimum
+    for (let tau = minP; tau <= maxP; tau++)
+      if (cmnd[tau] < bestVal) { bestVal = cmnd[tau]; bestTau = tau; }
+    if (bestVal > 0.50) return { freq: -1, rms };
   }
 
-  // 5. Final sub-harmonic check on the chosen best.
-  // If best.tau*2 also has a strong dip → best is likely octave too high → shift down.
-  const subTau = Math.round(best.tau * 2);
+  // 3. Parabolic refinement
+  if (bestTau > minP && bestTau < maxP) {
+    const v1=cmnd[bestTau-1], v2=cmnd[bestTau], v3=cmnd[bestTau+1];
+    const den = v1 - 2*v2 + v3;
+    if (Math.abs(den) > 1e-6) bestTau += 0.5*(v1-v3)/den;
+  }
+
+  // 4. Sub-harmonic check — correct octave-too-high errors.
+  // If tau*2 (= one octave lower) has a MUCH stronger dip than tau,
+  // we likely detected the 2nd harmonic instead of the fundamental.
+  // Condition: subVal < bestVal*0.5 AND subVal < 0.10 (very strict)
+  // This avoids the "go too low" trap.
+  let finalTau = bestTau;
+  const subTau = Math.round(bestTau * 2);
   if (subTau <= maxP) {
-    const subVal = cmnd[subTau];
+    const subVal = cmnd[Math.min(Math.round(subTau), maxP)];
     const subFreq = sr / subTau;
-    if (subFreq >= 38 && subVal < 0.35) {
-      // Sub-harmonic is credible — use it
-      let tau2 = subTau;
-      const v1=cmnd[tau2-1]||1, v2=cmnd[tau2], v3=cmnd[tau2+1]||1;
-      const den = v1-2*v2+v3;
-      if (Math.abs(den) > 1e-6) tau2 += 0.5*(v1-v3)/den;
-      best = { tau: tau2, val: subVal, freq: sr/tau2 };
+    if (subFreq >= 60 && subVal < bestVal * 0.6 && subVal < 0.15) {
+      // Sub-harmonic is significantly stronger — use it (true fundamental)
+      let t2 = subTau;
+      if (t2 > 1 && t2 < maxP) {
+        const v1=cmnd[t2-1], v2=cmnd[t2], v3=cmnd[t2+1];
+        const den = v1-2*v2+v3;
+        if (Math.abs(den)>1e-6) t2 += 0.5*(v1-v3)/den;
+      }
+      finalTau = t2;
     }
   }
 
-  return { freq: (best.freq >= 38 && best.freq <= 1100) ? best.freq : -1, rms };
+  const freq = sr / finalTau;
+  return { freq: (freq >= 60 && freq <= 1100) ? freq : -1, rms };
 }
 
 // ══ SCREEN MANAGEMENT ════════════════════════════════════════
@@ -770,7 +752,7 @@ async function analyzeBuffer(buf, onProgress) {
       samplePos: i, t: i / sr,
       freq:  freq > 0 ? freq : 0,
       midi:  freq > 0 ? f2midi(freq) : 0,
-      voiced: freq > 0 && rms > 0.005, rms
+      voiced: freq > 0 && rms > 0.008, rms
     });
     if (frames.length % 400 === 0) {
       const p = i / data.length * 0.9;
@@ -817,7 +799,7 @@ async function analyzeBuffer(buf, onProgress) {
         }
       }
       // Unvoice outliers that don't fit even after correction
-      if (!fixed && Math.abs(frames[i].midi - med) > 3.0) frames[i].voiced = false;
+      if (!fixed && Math.abs(frames[i].midi - med) > 4.0) frames[i].voiced = false;
     }
   }
 
@@ -911,7 +893,7 @@ async function analyzeBuffer(buf, onProgress) {
       const lm = liveFreqs.filter(f=>f>38&&f<1100).map(f=>f2midi(f)).sort((a,b)=>a-b);
       if (lm.length) liveMedianMidi = lm[Math.floor(lm.length/2)];
     }
-    const anchor = (Math.abs(liveMedianMidi-gMed) < 6) ? (liveMedianMidi*0.6+gMed*0.4) : gMed;
+    const anchor = (Math.abs(liveMedianMidi-gMed) < 6) ? (liveMedianMidi*0.4+gMed*0.6) : gMed;
 
     // 8 passes — enough to propagate corrections through a full song
     for (let pass = 0; pass < 8; pass++) {
