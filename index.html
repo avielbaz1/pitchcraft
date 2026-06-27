@@ -591,7 +591,7 @@ async function processAudio(){
 }
 
 async function loadAudioFromUrl(urlOrBuffer,name){
-  // Always create a fresh AudioContext — the previous one may be closed/suspended
+  // Create a temporary context just for decoding
   try{ if(audioCtx && audioCtx.state!=='closed') await audioCtx.close(); }catch(_){}
   audioCtx=new(window.AudioContext||window.webkitAudioContext)();
   let ab;
@@ -604,8 +604,22 @@ async function loadAudioFromUrl(urlOrBuffer,name){
     catch(e){throw new Error('Failed to load audio (try serving over http, not file://).');}
   }
   originalBuffer=await audioCtx.decodeAudioData(ab);
-  // Note: audioCtx SR may differ from buffer SR on some devices.
-  // Modern browsers handle this resampling transparently with good quality.
+  // Recreate context at the buffer's exact sample rate.
+  // This prevents the browser from resampling (e.g. 44100→48000) during playback,
+  // which causes HF rolloff. We must close the decode context first.
+  const bufSR=originalBuffer.sampleRate;
+  if(audioCtx.sampleRate!==bufSR){
+    // Transfer buffer data before closing context
+    const tempData=[];
+    for(let ch=0;ch<originalBuffer.numberOfChannels;ch++)
+      tempData.push(new Float32Array(originalBuffer.getChannelData(ch)));
+    try{await audioCtx.close();}catch(e){}
+    audioCtx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:bufSR});
+    // Rebuild buffer in new context
+    const newBuf=audioCtx.createBuffer(tempData.length,tempData[0].length,bufSR);
+    for(let ch=0;ch<tempData.length;ch++) newBuf.getChannelData(ch).set(tempData[ch]);
+    originalBuffer=newBuf;
+  }
   correctedBuffer=cloneBuffer(originalBuffer);
   document.getElementById('proc-text').textContent='detecting notes...';
   document.getElementById('proc-bar').style.width='0%';
@@ -3051,9 +3065,9 @@ function rebuildCorrectedBuffer(){
   if(!originalBuffer)return;
   correctedBuffer=cloneBuffer(originalBuffer);
   const sr=originalBuffer.sampleRate;
-  // Longer crossfade = smoother boundaries. 40ms is enough to hide
-  // any phase vocoder frame boundary without audible blur.
-  const FADE=Math.floor(sr*0.020); // 20ms — one pitch period, enough for PSOLA to settle
+  // 40ms crossfade — enough for any voice fundamental (down to ~80Hz = 12ms period)
+  // Must cover at least 3 pitch periods to avoid amplitude modulation artifacts
+  const FADE=Math.floor(sr*0.040);
 
   notes.forEach(n=>{
     const hasShift=Math.abs(n.tuneOffset)>0.005;
