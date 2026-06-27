@@ -611,9 +611,7 @@ async function processAudio(){
 async function loadAudioFromUrl(urlOrBuffer,name){
   // Always create a fresh AudioContext — the previous one may be closed/suspended
   try{ if(audioCtx && audioCtx.state!=='closed') await audioCtx.close(); }catch(_){}
-  // Match context sample rate to buffer to avoid resampling artifacts
-  const _tmpCtx=new(window.AudioContext||window.webkitAudioContext)();
-  audioCtx=_tmpCtx;
+  audioCtx=new(window.AudioContext||window.webkitAudioContext)();
   let ab;
   if(urlOrBuffer instanceof ArrayBuffer){
     ab=urlOrBuffer;
@@ -624,12 +622,8 @@ async function loadAudioFromUrl(urlOrBuffer,name){
     catch(e){throw new Error('Failed to load audio (try serving over http, not file://).');}
   }
   originalBuffer=await audioCtx.decodeAudioData(ab);
-  // Recreate context at buffer's exact sample rate — prevents HF rolloff from resampling
-  if(audioCtx.sampleRate!==originalBuffer.sampleRate){
-    const sr=originalBuffer.sampleRate;
-    try{await audioCtx.close();}catch(e){}
-    audioCtx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:sr});
-  }
+  // Note: audioCtx SR may differ from buffer SR on some devices.
+  // Modern browsers handle this resampling transparently with good quality.
   correctedBuffer=cloneBuffer(originalBuffer);
   document.getElementById('proc-text').textContent='detecting notes...';
   document.getElementById('proc-bar').style.width='0%';
@@ -1485,13 +1479,17 @@ function playAudio(){
   if(sourceNode){try{sourceNode.disconnect();sourceNode.stop();}catch(e){}}
   sourceNode=audioCtx.createBufferSource();
   sourceNode.buffer=buf;
-  // Route through reverb graph if active, else direct
-  updateReverbGraph();
-  if(_reverbMix>0&&_reverbTime>0&&_dryGain&&_reverbNode){
-    sourceNode.connect(_dryGain);
-    sourceNode.connect(_reverbNode);
+  // Direct to destination when no reverb — cleanest possible signal path
+  if(_reverbMix>0&&_reverbTime>0){
+    updateReverbGraph();
+    if(_dryGain&&_reverbNode){
+      sourceNode.connect(_dryGain);
+      sourceNode.connect(_reverbNode);
+    } else {
+      sourceNode.connect(audioCtx.destination);
+    }
   } else {
-    sourceNode.connect(_masterGain||audioCtx.destination);
+    sourceNode.connect(audioCtx.destination);
   }
   playStartTime=audioCtx.currentTime;
   sourceNode.start(0,playOffset);
@@ -3150,26 +3148,9 @@ function rebuildCorrectedBuffer(){
       }
       correctedBuffer=applyNoiseReduction(correctedBuffer,_nrAmount);
     }
-    // Reverb is now handled by Web Audio graph — no offline processing needed
-    // Update reverb graph and restart playback if needed
-    if(isPlaying){
-      const pos=audioCtx.currentTime-playStartTime+playOffset;
-      try{sourceNode.disconnect();sourceNode.stop();}catch(e){}
-      sourceNode=audioCtx.createBufferSource();
-      sourceNode.buffer=bypassMode?originalBuffer:correctedBuffer;
-      updateReverbGraph();
-      if(_reverbMix>0&&_reverbTime>0&&_dryGain&&_reverbNode){
-        sourceNode.connect(_dryGain);
-        sourceNode.connect(_reverbNode);
-      } else {
-        sourceNode.connect(_masterGain||audioCtx.destination);
-      }
-      playStartTime=audioCtx.currentTime;
-      playOffset=Math.max(0,pos);
-      sourceNode.start(0,playOffset);
-    } else {
-      updateReverbGraph();
-    }
+    // Update reverb graph only — do NOT stop/restart playback.
+    // Current playback continues uninterrupted; reverb applies on next Play press.
+    updateReverbGraph();
     updateMinimap();
   };
   if(_nrAmount>0){
