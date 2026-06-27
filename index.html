@@ -2084,6 +2084,14 @@ npmPitchSl.onchange=()=>{
   // re-snapshot base offsets after commit
   notes.filter(n=>n.selected).forEach(n=>{ _npmPitchBase[n.startSample]=n.tuneOffset; });
 };
+npmPitchSl.addEventListener('touchend',()=>{
+  pushUndo();
+  rebuildCorrectedBuffer();
+  drawEditor();
+  npmPitchSl.value=0;
+  npmPitchVal.textContent='0¢';
+  notes.filter(n=>n.selected).forEach(n=>{ _npmPitchBase[n.startSample]=n.tuneOffset; });
+},{passive:true});
 document.getElementById('npm-pitch-dn').onclick=()=>{
   pushUndo();
   notes.filter(n=>n.selected).forEach(n=>{
@@ -2109,6 +2117,7 @@ npmVibSl.oninput=()=>{
   drawEditor();
 };
 npmVibSl.onchange=()=>{ rebuildCorrectedBuffer(); drawEditor(); };
+npmVibSl.addEventListener('touchend',()=>{ rebuildCorrectedBuffer(); drawEditor(); },{passive:true});
 document.getElementById('npm-vib-dn').onclick=()=>{
   const sel=notes.filter(n=>n.selected); if(!sel.length)return;
   pushUndo();
@@ -2190,6 +2199,13 @@ npPitchSl.onchange=()=>{
   playNote(selectedNote);
   pushUndo();refreshNoteList();
 };
+// Mobile: touchend fires instead of change on iOS/Android
+npPitchSl.addEventListener('touchend',()=>{
+  if(!selectedNote)return;
+  rebuildCorrectedBuffer();
+  playNote(selectedNote);
+  pushUndo();refreshNoteList();
+},{passive:true});
 
 // Lightweight preview: plays 400ms of the note from original buffer with Web Audio playbackRate
 // No WSOLA — just resampling. Fast enough for real-time feedback.
@@ -2217,6 +2233,7 @@ npVibSl.oninput=()=>{
   drawEditor(); // update pitch graph in real time
 };
 npVibSl.onchange=()=>{ if(selectedNote){ rebuildCorrectedBuffer(); drawEditor(); } };
+npVibSl.addEventListener('touchend',()=>{ if(selectedNote){ rebuildCorrectedBuffer(); drawEditor(); } },{passive:true});
 
 // step buttons
 document.getElementById('np-pitch-dn').onclick=()=>{
@@ -2797,44 +2814,42 @@ function applyReverb(srcBuffer, reverbTime, mix){
   return dst;
 }
 
-nrSlider.oninput=()=>{
+// ── NR and Reverb sliders — mobile-safe with debounce ──────────
+// iOS/Android don't reliably fire 'change' on range inputs.
+// We use 'input' for live label updates and a short debounce for rebuild.
+let _sliderDebounce=null;
+function _sliderRebuild(){
+  clearTimeout(_sliderDebounce);
+  _sliderDebounce=setTimeout(()=>{
+    if(originalBuffer) rebuildCorrectedBuffer();
+    drawEditor();
+  }, 300);
+}
+
+nrSlider.addEventListener('input',()=>{
   _nrAmount=parseInt(nrSlider.value)/100;
   nrVal.textContent=nrSlider.value+'%';
-};
-nrSlider.onchange=()=>{
-  _nrAmount=parseInt(nrSlider.value)/100;
-  nrVal.textContent=nrSlider.value+'%';
-  // Build noise profile on first use
   if(_nrAmount>0&&!_noiseProfile&&originalBuffer){
     _noiseProfile=buildNoiseProfile(originalBuffer.getChannelData(0),originalBuffer.sampleRate);
   }
-  rebuildCorrectedBuffer();
-  drawEditor();
-};
+  _sliderRebuild();
+});
 
-// ── Reverb sliders ──
 const reverbTimeSlider=document.getElementById('reverb-time-slider');
 const reverbTimeVal=document.getElementById('reverb-time-val');
 const reverbMixSlider=document.getElementById('reverb-mix-slider');
 const reverbMixVal=document.getElementById('reverb-mix-val');
-reverbTimeSlider.oninput=()=>{
-  reverbTimeVal.textContent=reverbTimeSlider.value+'%';
-};
-reverbTimeSlider.onchange=()=>{
+
+reverbTimeSlider.addEventListener('input',()=>{
   _reverbTime=parseInt(reverbTimeSlider.value)/100;
   reverbTimeVal.textContent=reverbTimeSlider.value+'%';
-  if(originalBuffer) rebuildCorrectedBuffer();
-  drawEditor();
-};
-reverbMixSlider.oninput=()=>{
-  reverbMixVal.textContent=reverbMixSlider.value+'%';
-};
-reverbMixSlider.onchange=()=>{
+  _sliderRebuild();
+});
+reverbMixSlider.addEventListener('input',()=>{
   _reverbMix=parseInt(reverbMixSlider.value)/100;
   reverbMixVal.textContent=reverbMixSlider.value+'%';
-  if(originalBuffer) rebuildCorrectedBuffer();
-  drawEditor();
-};
+  _sliderRebuild();
+});
 // ══ PSOLA PITCH SHIFTER ════════════════════════════════════════
 // Two independent counters: inMark (T0) and outMark (T_out = T0/ratio).
 // OLA normalization: divide by sum(w) not sum(w^2) — eliminates amplitude spikes.
