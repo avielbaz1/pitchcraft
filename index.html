@@ -800,20 +800,31 @@ async function analyzeBuffer(buf, onProgress) {
     if (Math.abs(frames[i].midi - med) > 0.7) { frames[i].midi = med; frames[i].freq = midi2f(med); }
   }
 
-  // Pass 2b — per-frame octave/fifth/fourth correction
-  const RADIUS = 18;
-  for (let i = RADIUS; i < frames.length - RADIUS; i++) {
-    if (!frames[i].voiced) continue;
-    const nb = [];
-    for (let k = i - RADIUS; k <= i + RADIUS; k++) if (k !== i && frames[k].voiced) nb.push(frames[k].midi);
-    if (nb.length < 10) continue;
-    nb.sort((a,b) => a-b);
-    const med = nb[Math.floor(nb.length/2)];
-    const diff = frames[i].midi - med;
-    const traps = [12,-12,7,-7,5,-5,19,-19,24,-24];
-    let fixed = false;
-    for (const t of traps) { if (Math.abs(diff-t) < 1.4) { frames[i].midi -= t; frames[i].freq = midi2f(frames[i].midi); fixed = true; break; } }
-    if (!fixed && Math.abs(diff) > 3.5) frames[i].voiced = false;
+  // Pass 2b — per-frame octave correction (two passes for propagation)
+  for (let pass2 = 0; pass2 < 2; pass2++) {
+    const RADIUS = 32; // wider window catches more context
+    for (let i = RADIUS; i < frames.length - RADIUS; i++) {
+      if (!frames[i].voiced) continue;
+      const nb = [];
+      for (let k = i - RADIUS; k <= i + RADIUS; k++)
+        if (k !== i && frames[k].voiced) nb.push(frames[k].midi);
+      if (nb.length < 8) continue;
+      nb.sort((a,b) => a-b);
+      const med = nb[Math.floor(nb.length/2)];
+      const diff = frames[i].midi - med;
+      // Check octave errors first (most common), then fifth/fourth
+      const traps = [12,-12,24,-24,7,-7,5,-5,19,-19];
+      let fixed = false;
+      for (const t of traps) {
+        if (Math.abs(diff-t) < 1.8) {
+          frames[i].midi -= t;
+          frames[i].freq = midi2f(frames[i].midi);
+          fixed = true; break;
+        }
+      }
+      // Unvoice outliers that don't fit even after correction
+      if (!fixed && Math.abs(frames[i].midi - med) > 3.0) frames[i].voiced = false;
+    }
   }
 
   // Pass 3 — segmentation
@@ -1474,7 +1485,14 @@ function playAudio(){
   if(sourceNode){try{sourceNode.disconnect();sourceNode.stop();}catch(e){}}
   sourceNode=audioCtx.createBufferSource();
   sourceNode.buffer=buf;
-  sourceNode.connect(audioCtx.destination);
+  // Route through reverb graph if active, else direct
+  updateReverbGraph();
+  if(_reverbMix>0&&_reverbTime>0&&_dryGain&&_reverbNode){
+    sourceNode.connect(_dryGain);
+    sourceNode.connect(_reverbNode);
+  } else {
+    sourceNode.connect(_masterGain||audioCtx.destination);
+  }
   playStartTime=audioCtx.currentTime;
   sourceNode.start(0,playOffset);
   sourceNode.onended=()=>{
@@ -2756,13 +2774,15 @@ function applyNoiseReduction(srcBuffer, amount){
     const smoothPow=new Float32Array(BINS);
     const alpha=0.88;
 
+    // Pre-compute Hann window once
+    const hannWin=new Float32Array(FFT);
+    for(let i=0;i<FFT;i++) hannWin[i]=0.5*(1-Math.cos(2*Math.PI*i/(FFT-1)));
+
     for(let fi=0;fi<numFrames;fi++){
       const off=fi*HOP;
       const re=new Float32Array(FFT),im=new Float32Array(FFT);
-      const win=new Float32Array(FFT);
       for(let i=0;i<FFT;i++){
-        win[i]=0.5*(1-Math.cos(2*Math.PI*i/(FFT-1)));
-        re[i]=(off+i<src.length?src[off+i]:0)*win[i];
+        re[i]=(off+i<src.length?src[off+i]:0)*hannWin[i];
       }
       fftReal(re,im,FFT);
 
@@ -2783,8 +2803,8 @@ function applyNoiseReduction(srcBuffer, amount){
 
       for(let i=0;i<FFT;i++){
         const idx=off+i; if(idx>=src.length) break;
-        outW[idx]  +=re[i]*win[i];
-        outWgt[idx]+=win[i];         // sum(w) not sum(w^2) — flat amplitude
+        outW[idx]  +=re[i]*hannWin[i];
+        outWgt[idx]+=hannWin[i];
       }
     }
     for(let i=0;i<src.length;i++){
@@ -2801,71 +2821,57 @@ function applyNoiseReduction(srcBuffer, amount){
 // reverbMix: 0–1 (wet/dry)
 let _reverbTime=0;
 let _reverbMix=0;
+let _reverbNode=null;   // ConvolverNode
+let _dryGain=null;      // dry signal gain
+let _wetGain=null;      // wet signal gain
+let _masterGain=null;   // master output
 
-function applyReverb(srcBuffer, reverbTime, mix){
-  if(mix<=0) return srcBuffer;
-  const sr=srcBuffer.sampleRate;
-  const rt60=0.3+reverbTime*2.7; // 0.3s – 3.0s
-  const ctx=audioCtx||new(window.AudioContext||window.webkitAudioContext)({sampleRate:sr});
-  const dst=ctx.createBuffer(srcBuffer.numberOfChannels,srcBuffer.length,sr);
-
-  // Comb filter delays (prime-number based to avoid flutter)
-  const combDelays=[1687,1601,2053,2251]; // samples @ 44100
-  const apDelays=[241,83];
-
-  for(let ch=0;ch<srcBuffer.numberOfChannels;ch++){
-    const src=srcBuffer.getChannelData(ch);
-    const out=new Float32Array(src.length);
-
-    // Scale delays for actual sample rate
-    const scale=sr/44100;
-    const cDelays=combDelays.map(d=>Math.round(d*scale));
-    const aDelays=apDelays.map(d=>Math.round(d*scale));
-
-    // Parallel comb filters
-    const combOut=new Float32Array(src.length);
-    for(const dlen of cDelays){
-      const buf=new Float32Array(dlen);
-      // g = 10^(-3*delay/rt60) → standard RT60 formula
-      const g=Math.pow(10,-3*dlen/(sr*rt60));
-      let pos=0;
-      const cOut=new Float32Array(src.length);
-      for(let i=0;i<src.length;i++){
-        const delayed=buf[pos];
-        buf[pos]=src[i]+delayed*g;
-        pos=(pos+1)%dlen;
-        cOut[i]=delayed;
-      }
-      for(let i=0;i<src.length;i++) combOut[i]+=cOut[i]*0.25;
+// Build exponential decay IR for ConvolverNode
+function buildReverbIR(rt60, sr){
+  const len=Math.round(rt60*sr);
+  const ir=audioCtx.createBuffer(2,len,sr);
+  for(let ch=0;ch<2;ch++){
+    const d=ir.getChannelData(ch);
+    for(let i=0;i<len;i++){
+      d[i]=(Math.random()*2-1)*Math.pow(1-i/len, rt60*1.5);
     }
-
-    // Series allpass filters (diffusion)
-    let ap=combOut;
-    for(const dlen of aDelays){
-      const buf=new Float32Array(dlen);
-      const g=0.7;
-      let pos=0;
-      const aOut=new Float32Array(src.length);
-      for(let i=0;i<ap.length;i++){
-        const delayed=buf[pos];
-        const w=ap[i]-g*delayed;
-        buf[pos]=w;
-        pos=(pos+1)%dlen;
-        aOut[i]=delayed+g*w;
-      }
-      ap=aOut;
-    }
-
-    // Mix dry+wet
-    const wet=mix;
-    const dry=1-mix*0.5; // never fully remove dry signal
-    for(let i=0;i<src.length;i++){
-      out[i]=src[i]*dry+ap[i]*wet;
-    }
-    dst.getChannelData(ch).set(out);
   }
-  return dst;
+  return ir;
 }
+
+// Set up / update the reverb Web Audio graph
+function updateReverbGraph(){
+  if(!audioCtx||!originalBuffer) return;
+  // Disconnect previous
+  try{if(_reverbNode) _reverbNode.disconnect();}catch(e){}
+  try{if(_dryGain)    _dryGain.disconnect();}catch(e){}
+  try{if(_wetGain)    _wetGain.disconnect();}catch(e){}
+  try{if(_masterGain) _masterGain.disconnect();}catch(e){}
+
+  _masterGain=audioCtx.createGain();
+  _masterGain.gain.value=1;
+  _masterGain.connect(audioCtx.destination);
+
+  if(_reverbMix>0&&_reverbTime>0){
+    _dryGain=audioCtx.createGain();
+    _dryGain.gain.value=1-_reverbMix*0.5;
+    _dryGain.connect(_masterGain);
+
+    _reverbNode=audioCtx.createConvolver();
+    _reverbNode.normalize=true;
+    const rt60=0.3+_reverbTime*2.7;
+    _reverbNode.buffer=buildReverbIR(rt60, audioCtx.sampleRate);
+
+    _wetGain=audioCtx.createGain();
+    _wetGain.gain.value=_reverbMix;
+    _reverbNode.connect(_wetGain);
+    _wetGain.connect(_masterGain);
+  }
+}
+
+// applyReverb is now a no-op — reverb handled by Web Audio graph
+function applyReverb(srcBuffer){ return srcBuffer; }
+
 
 // ── Custom sliders — work on all mobile browsers ──────────────
 // Native range inputs fail on iOS inside position:fixed containers.
@@ -3144,26 +3150,32 @@ function rebuildCorrectedBuffer(){
       }
       correctedBuffer=applyNoiseReduction(correctedBuffer,_nrAmount);
     }
-    if(_reverbMix>0&&_reverbTime>0){
-      correctedBuffer=applyReverb(correctedBuffer,_reverbTime,_reverbMix);
-    }
-    // If currently playing, swap buffer live
-    if(isPlaying&&sourceNode){
+    // Reverb is now handled by Web Audio graph — no offline processing needed
+    // Update reverb graph and restart playback if needed
+    if(isPlaying){
       const pos=audioCtx.currentTime-playStartTime+playOffset;
-      try{sourceNode.stop();}catch(e){}
+      try{sourceNode.disconnect();sourceNode.stop();}catch(e){}
       sourceNode=audioCtx.createBufferSource();
       sourceNode.buffer=bypassMode?originalBuffer:correctedBuffer;
-      sourceNode.connect(audioCtx.destination);
+      updateReverbGraph();
+      if(_reverbMix>0&&_reverbTime>0&&_dryGain&&_reverbNode){
+        sourceNode.connect(_dryGain);
+        sourceNode.connect(_reverbNode);
+      } else {
+        sourceNode.connect(_masterGain||audioCtx.destination);
+      }
       playStartTime=audioCtx.currentTime;
-      playOffset=pos;
-      sourceNode.start(0,Math.max(0,pos));
+      playOffset=Math.max(0,pos);
+      sourceNode.start(0,playOffset);
+    } else {
+      updateReverbGraph();
     }
     updateMinimap();
   };
-  if(_nrAmount>0||(_reverbMix>0&&_reverbTime>0)){
-    setTimeout(_postProcess, 0); // yield to UI before heavy processing
+  if(_nrAmount>0){
+    setTimeout(_postProcess, 0); // yield to UI before heavy NR processing
   } else {
-    updateMinimap();
+    _postProcess(); // reverb is instant (graph update only)
   }
 }
 
