@@ -109,8 +109,8 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--sans);height:
 .panel-row:last-child{margin-bottom:0}
 .panel-lbl{font-size:10px;font-family:var(--mono);color:var(--neon-cyan);width:72px;flex-shrink:0;font-weight:600;letter-spacing:2px;text-transform:uppercase;text-shadow:0 0 6px rgba(0,243,255,.4)}
 .slider-wrap{flex:1;position:relative;height:20px;display:flex;align-items:center}
-input[type=range]{width:100%;-webkit-appearance:none;height:2px;border-radius:0;background:rgba(0,243,255,.15);outline:none}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:20px;border-radius:2px;background:var(--neon-cyan);cursor:pointer;box-shadow:0 0 8px rgba(0,243,255,.6);border:none}
+input[type=range]{width:100%;-webkit-appearance:none;height:2px;border-radius:0;background:rgba(0,243,255,.15);outline:none;touch-action:none;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:28px;border-radius:2px;background:var(--neon-cyan);cursor:pointer;box-shadow:0 0 8px rgba(0,243,255,.6);border:none}
 input[type=range]:disabled{opacity:.3}
 .slider-val{font-family:var(--mono);font-size:10px;color:var(--neon-cyan);width:36px;text-align:right;flex-shrink:0;text-shadow:0 0 6px rgba(0,243,255,.3)}
 .export-btn{height:34px;padding:0 14px;border-radius:3px;background:transparent;border:1px solid var(--neon-lime);color:var(--neon-lime);font-size:10px;font-weight:700;font-family:var(--mono);cursor:pointer;transition:all .13s;flex-shrink:0;letter-spacing:1.5px;text-transform:uppercase;text-shadow:0 0 8px rgba(177,240,0,.5)}
@@ -143,8 +143,8 @@ input[type=range]:disabled{opacity:.3}
 .np-step{width:30px;height:24px;border-radius:2px;border:1px solid rgba(0,243,255,.2);background:rgba(0,0,0,.5);color:var(--neon-cyan);font-size:10px;font-family:var(--mono);cursor:pointer;flex-shrink:0;transition:all .12s}
 .np-step:hover{background:rgba(0,243,255,.1);box-shadow:0 0 8px rgba(0,243,255,.15)}
 .np-step:active{transform:scale(.95)}
-input[type=range]{flex:1;-webkit-appearance:none;height:2px;border-radius:0;background:rgba(0,243,255,.15);outline:none;cursor:pointer}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:20px;border-radius:2px;background:var(--neon-cyan);cursor:pointer;box-shadow:0 0 8px rgba(0,243,255,.6);border:none}
+input[type=range]{flex:1;-webkit-appearance:none;height:2px;border-radius:0;background:rgba(0,243,255,.15);outline:none;cursor:pointer;touch-action:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:28px;border-radius:2px;background:var(--neon-cyan);cursor:pointer;box-shadow:0 0 8px rgba(0,243,255,.6);border:none}
 .np-val{font-family:var(--mono);font-size:10px;color:var(--neon-cyan);width:32px;text-align:right;flex-shrink:0;text-shadow:0 0 6px rgba(0,243,255,.3);letter-spacing:.5px}
 
 /* multi-select panel */
@@ -326,22 +326,20 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
   <div class="bottom-panel">
     <div class="panel-row">
       <span class="panel-lbl">noise</span>
-      <div class="slider-wrap" style="max-width:28%">
+      <div class="slider-wrap" style="max-width:33%">
         <input type="range" id="nr-slider" min="0" max="100" value="0">
       </div>
       <span class="slider-val" id="nr-val">0%</span>
-      <button id="nr-apply-btn" style="font-size:9px;font-family:var(--mono);padding:2px 8px;border-radius:2px;border:1px solid rgba(0,243,255,.3);background:rgba(0,243,255,.08);color:var(--neon-cyan);cursor:pointer;letter-spacing:1px;flex-shrink:0">OK</button>
       <span class="panel-lbl" style="margin-left:auto">rev time</span>
-      <div class="slider-wrap" style="max-width:17%">
+      <div class="slider-wrap" style="max-width:22%">
         <input type="range" id="reverb-time-slider" min="0" max="100" value="0">
       </div>
       <span class="slider-val" id="reverb-time-val">0%</span>
       <span class="panel-lbl" style="margin-left:.5rem">rev mix</span>
-      <div class="slider-wrap" style="max-width:17%">
+      <div class="slider-wrap" style="max-width:22%">
         <input type="range" id="reverb-mix-slider" min="0" max="100" value="0">
       </div>
       <span class="slider-val" id="reverb-mix-val">0%</span>
-      <button id="reverb-apply-btn" style="font-size:9px;font-family:var(--mono);padding:2px 8px;border-radius:2px;border:1px solid rgba(255,0,255,.3);background:rgba(255,0,255,.08);color:var(--neon-mag);cursor:pointer;letter-spacing:1px;flex-shrink:0">OK</button>
     </div>
     <div class="panel-row">
     <input type="range" id="q-slider" min="0" max="100" value="0" style="display:none">
@@ -2836,14 +2834,6 @@ nrSlider.addEventListener('input',()=>{
   }
   _sliderRebuild();
 });
-// OK button — explicit apply for mobile where onchange/touchend may not fire
-document.getElementById('nr-apply-btn').addEventListener('click',()=>{
-  _nrAmount=parseInt(nrSlider.value)/100;
-  if(_nrAmount>0&&!_noiseProfile&&originalBuffer){
-    _noiseProfile=buildNoiseProfile(originalBuffer.getChannelData(0),originalBuffer.sampleRate);
-  }
-  if(originalBuffer){rebuildCorrectedBuffer();drawEditor();}
-});
 
 const reverbTimeSlider=document.getElementById('reverb-time-slider');
 const reverbTimeVal=document.getElementById('reverb-time-val');
@@ -2859,12 +2849,6 @@ reverbMixSlider.addEventListener('input',()=>{
   _reverbMix=parseInt(reverbMixSlider.value)/100;
   reverbMixVal.textContent=reverbMixSlider.value+'%';
   _sliderRebuild();
-});
-// OK button for reverb
-document.getElementById('reverb-apply-btn').addEventListener('click',()=>{
-  _reverbTime=parseInt(reverbTimeSlider.value)/100;
-  _reverbMix=parseInt(reverbMixSlider.value)/100;
-  if(originalBuffer){rebuildCorrectedBuffer();drawEditor();}
 });
 // ══ PSOLA PITCH SHIFTER ════════════════════════════════════════
 // Two independent counters: inMark (T0) and outMark (T_out = T0/ratio).
