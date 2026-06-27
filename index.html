@@ -3102,23 +3102,38 @@ function rebuildCorrectedBuffer(){
       const dst=correctedBuffer.getChannelData(ch);
       const seg=src.slice(start,end);
 
-      // PSOLA pitch shift — time domain, preserves formants
+      // PSOLA pitch shift
       const shifted=pitchShift(seg, avgRatio, segLen);
 
-      // Full-cosine crossfade — smoothest possible transition, no discontinuity
-      const maxFade=Math.floor(segLen/3);
-      const fadeIn=Math.min(FADE, maxFade);
-      const fadeOut=Math.min(FADE, maxFade);
-      for(let i=0;i<fadeIn;i++){
-        const w=0.5*(1-Math.cos(Math.PI*i/fadeIn)); // 0→1 smooth
+      // Find last well-covered sample from PSOLA
+      // (PSOLA fades to 0 at end when inMark exceeds seg length)
+      let lastGood=segLen-1;
+      while(lastGood>0 && Math.abs(shifted[lastGood])<1e-6 && Math.abs(shifted[lastGood-1])<1e-6)
+        lastGood--;
+
+      // Fade-in: src→shifted at segment start
+      const maxFadeIn=Math.min(FADE, Math.floor(segLen/4));
+      for(let i=0;i<maxFadeIn;i++){
+        const w=0.5*(1-Math.cos(Math.PI*i/maxFadeIn));
         dst[start+i]=src[start+i]*(1-w)+shifted[i]*w;
       }
-      for(let i=fadeIn;i<segLen-fadeOut;i++) dst[start+i]=shifted[i];
-      for(let i=0;i<fadeOut;i++){
-        const w=0.5*(1+Math.cos(Math.PI*i/fadeOut)); // 1→0 smooth
-        const pos=segLen-fadeOut+i;
-        dst[start+pos]=shifted[pos]*w+src[start+pos]*(1-w);
+
+      // Middle: pure shifted
+      const middleEnd=Math.min(lastGood, segLen-1);
+      for(let i=maxFadeIn;i<middleEnd;i++) dst[start+i]=shifted[i];
+
+      // Fade-out: shifted→src, starting from lastGood back
+      // This ensures we never try to crossfade using the zero-padded tail of PSOLA
+      const fadeOutLen=Math.min(FADE, lastGood-maxFadeIn, Math.floor(segLen/4));
+      const fadeOutStart=lastGood-fadeOutLen;
+      for(let i=0;i<fadeOutLen;i++){
+        const w=0.5*(1+Math.cos(Math.PI*i/fadeOutLen)); // 1→0
+        const pos=fadeOutStart+i;
+        if(pos>=0 && pos<segLen)
+          dst[start+pos]=shifted[pos]*w+src[start+pos]*(1-w);
       }
+      // Fill rest with original (after PSOLA coverage ends)
+      for(let i=lastGood;i<segLen;i++) dst[start+i]=src[start+i];
     }
   });
 
