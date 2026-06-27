@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>PitchCraft</title>
+<title>PitchMe</title>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -167,8 +167,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 <!-- ══ SCREEN 1: RECORD ══════════════════════════════════════ -->
 <div class="screen" id="rec-screen">
   <div class="brand">
-    <h1>PITCH<em>CRAFT</em></h1>
-    <p>vocal pitch correction</p>
+    <h1>PITCH<em>ME</em></h1>
+    <p>vocal pitch correction · PitchMe</p>
   </div>
   <div class="rec-card">
     <div style="margin-bottom:.75rem">
@@ -222,7 +222,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
   <div class="ed-top">
     <span class="back-btn" id="back-btn">NEW</span>
     <span style="flex:1;min-width:1.5rem"></span>
-    <span class="ed-title">PitchCraft</span>
+    <span class="ed-title">PitchMe</span>
     <div style="display:flex;align-items:center;gap:.6rem;margin-left:auto">
       <span class="playhead-time" id="ph-time">0:00.0</span>
       <span class="ed-dur" id="ed-dur">0:00</span>
@@ -277,6 +277,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
         <span class="np-multi-header">Multi-select</span>
         <span class="np-multi-count" id="np-multi-count">0 notes</span>
         <button class="np-multi-btn accent" id="np-multi-merge" style="margin-left:.35rem">merge</button>
+        <button class="np-multi-btn" id="np-multi-snap" style="margin-left:.35rem;border-color:rgba(177,240,0,.5);color:var(--neon-lime)">snap</button>
         <button class="np-multi-btn" id="np-multi-delete" style="margin-left:.35rem;border-color:var(--red);color:var(--red)">delete</button>
         <button class="np-close" id="np-multi-close" style="margin-left:auto">✕</button>
       </div>
@@ -301,6 +302,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
         <span class="np-hz" id="np-hz">147Hz</span>
         <span class="np-cents" id="np-cents">+0¢</span>
         <button class="np-snap-btn" id="np-split" title="Split note in half">split</button>
+        <button class="np-snap-btn" id="np-snap-single" title="Snap to nearest semitone" style="border-color:rgba(177,240,0,.5);color:var(--neon-lime)">snap</button>
         <button class="np-snap-btn" id="np-delete" title="Delete note" style="border-color:var(--red);color:var(--red)">delete</button>
         <button class="np-close" id="np-close">✕</button>
       </div>
@@ -2241,6 +2243,18 @@ document.getElementById('np-vib-up').onclick=()=>{
   selectedNote.vibratoReduction=Math.min(100,(selectedNote.vibratoReduction||0)+10);
   updateNotePanel(selectedNote);rebuildCorrectedBuffer();
 };
+document.getElementById('np-multi-snap').onclick=()=>{
+  const sel=notes.filter(n=>n.selected);
+  if(!sel.length)return;
+  pushUndo();
+  sel.forEach(n=>{
+    const target=snapMidi(n.midi);
+    n.tuneOffset+=target-n.midi;
+    n.midi=n.midiOrig+n.tuneOffset;
+    updateNoteCents(n);
+  });
+  rebuildCorrectedBuffer();refreshNoteList();drawEditor();
+};
 document.getElementById('np-multi-delete').onclick=()=>{
   const sel=notes.filter(n=>n.selected);
   if(!sel.length)return;
@@ -2388,6 +2402,18 @@ document.getElementById('snap-all-btn').onclick=()=>{
   if(selectedNote) playNote(selectedNote);
 };
 
+
+
+document.getElementById('np-snap-single').onclick=()=>{
+  if(!selectedNote)return;
+  pushUndo();
+  const target=snapMidi(selectedNote.midi);
+  selectedNote.tuneOffset+=target-selectedNote.midi;
+  selectedNote.midi=selectedNote.midiOrig+selectedNote.tuneOffset;
+  updateNoteCents(selectedNote);
+  updateNotePanel(selectedNote);
+  rebuildCorrectedBuffer();refreshNoteList();drawEditor();playNote(selectedNote);
+};
 document.getElementById('np-delete').onclick=()=>{
   if(!selectedNote)return;
   pushUndo();
@@ -2636,7 +2662,7 @@ function fftReal(re,im,n){
 }
 // ══ IMPROVED NOISE REDUCTION — Wiener filter ══════════════════
 // Uniform processing across entire buffer — no gating between notes.
-// minGain floor ensures inter-note silences keep natural residual noise.
+// minGain floor keeps inter-note silences natural (not dead-silent gate).
 function applyNoiseReduction(srcBuffer, amount){
   if(amount<=0||!_noiseProfile) return srcBuffer;
   const sr=srcBuffer.sampleRate;
@@ -2645,10 +2671,10 @@ function applyNoiseReduction(srcBuffer, amount){
   const dst=ctx.createBuffer(srcBuffer.numberOfChannels,srcBuffer.length,sr);
   const BINS=FFT/2+1;
 
-  // Minimum gain floor — same everywhere (during notes AND between them).
-  // This keeps inter-note gaps sounding natural instead of dead-silent.
-  const minGain=Math.max(0.08, 1-amount*0.85);
-  const noiseScale=amount*2.0;
+  // minGain: at 100% still keeps a little residual so silence sounds natural
+  // noiseScale: how aggressively we treat measured noise — 3.5x at 100%
+  const minGain  = Math.max(0.02, 0.15*(1-amount));  // 0.15→0.02
+  const noiseScale = 1.0 + amount*2.5;               // 1.0→3.5
 
   for(let ch=0;ch<srcBuffer.numberOfChannels;ch++){
     const src=srcBuffer.getChannelData(ch);
@@ -2658,7 +2684,7 @@ function applyNoiseReduction(srcBuffer, amount){
     const outW=new Float32Array(src.length);
     const outWgt=new Float32Array(src.length);
     const smoothPow=new Float32Array(BINS);
-    const alpha=0.90;
+    const alpha=0.88;
 
     for(let fi=0;fi<numFrames;fi++){
       const off=fi*HOP;
@@ -2676,7 +2702,6 @@ function applyNoiseReduction(srcBuffer, amount){
         const noisePow=(_noiseProfile[k]*noiseScale)*(_noiseProfile[k]*noiseScale);
         const snr=Math.max(0,(smoothPow[k]-noisePow)/Math.max(noisePow,1e-12));
         const gain=snr/(snr+1);
-        // Uniform floor — not gate: same residual noise level everywhere
         const g=minGain+(1-minGain)*gain;
         re[k]*=g; im[k]*=g;
         if(k<BINS-1){re[FFT-k]*=g; im[FFT-k]*=g;}
@@ -2688,8 +2713,8 @@ function applyNoiseReduction(srcBuffer, amount){
 
       for(let i=0;i<FFT;i++){
         const idx=off+i; if(idx>=src.length) break;
-        outW[idx]+=re[i]*win[i];
-        outWgt[idx]+=win[i]*win[i];
+        outW[idx]  +=re[i]*win[i];
+        outWgt[idx]+=win[i];         // sum(w) not sum(w^2) — flat amplitude
       }
     }
     for(let i=0;i<src.length;i++){
@@ -2998,7 +3023,7 @@ function askFilename(defaultName){
     const input=document.getElementById('filename-input');
     const confirm=document.getElementById('filename-confirm');
     const cancel=document.getElementById('filename-cancel');
-    input.value=defaultName||'pitchcraft_export';
+    input.value=defaultName||'pitchme_export';
     dialog.style.display='flex';
     setTimeout(()=>{ input.focus(); input.select(); },100);
     const done=(name)=>{
@@ -3006,7 +3031,7 @@ function askFilename(defaultName){
       confirm.onclick=null; cancel.onclick=null;
       resolve(name);
     };
-    confirm.onclick=()=>done(input.value.trim()||defaultName||'pitchcraft_export');
+    confirm.onclick=()=>done(input.value.trim()||defaultName||'pitchme_export');
     cancel.onclick=()=>done(null);
     input.onkeydown=(e)=>{ if(e.key==='Enter') confirm.onclick(); if(e.key==='Escape') cancel.onclick(); };
   });
@@ -3016,7 +3041,7 @@ function askFilename(defaultName){
 document.getElementById('export-btn').onclick=async()=>{
   const buf=bypassMode?originalBuffer:correctedBuffer;
   if(!buf)return;
-  const name=await askFilename('pitchcraft_export');
+  const name=await askFilename('pitchme_export');
   if(!name)return;
   const wav=bufToWav(buf);
   const blob=new Blob([wav],{type:'audio/wav'});
@@ -3037,7 +3062,7 @@ let _ffmpegInstance = null;
 function idbGet(key) {
   return new Promise((res) => {
     try {
-      const req = indexedDB.open('pitchcraft', 1);
+      const req = indexedDB.open('pitchme', 1);
       req.onupgradeneeded = e => e.target.result.createObjectStore('cache');
       req.onsuccess = e => {
         try {
@@ -3054,7 +3079,7 @@ function idbGet(key) {
 function idbSet(key, value) {
   return new Promise((res, rej) => {
     try {
-      const req = indexedDB.open('pitchcraft', 1);
+      const req = indexedDB.open('pitchme', 1);
       req.onupgradeneeded = e => e.target.result.createObjectStore('cache');
       req.onsuccess = e => {
         try {
@@ -3147,7 +3172,7 @@ async function getFFmpeg() {
 }
 document.getElementById('export-video-btn').onclick=async()=>{
   if(!videoSourceFile||!correctedBuffer)return;
-  const defaultName=videoSourceFile.name.replace(/\.[^.]+$/,'')+'_pitchcraft';
+  const defaultName=videoSourceFile.name.replace(/\.[^.]+$/,'')+'_pitchme';
   const name=await askFilename(defaultName);
   if(!name)return;
 
@@ -3219,7 +3244,7 @@ document.getElementById('export-video-btn').onclick=async()=>{
   }catch(err){
     statusEl.textContent='export failed: '+err.message;
     subEl.textContent='check browser console for details';
-    console.error('[PitchCraft FFmpeg export]',err);
+    console.error('[PitchMe FFmpeg export]',err);
     try{_ffmpegInstance&&_ffmpegInstance.exit();}catch(_){}
     _ffmpegInstance=null;
     setTimeout(()=>{ overlay.style.display='none'; },5000);
