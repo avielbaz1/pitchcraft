@@ -109,8 +109,9 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--sans);height:
 .panel-row:last-child{margin-bottom:0}
 .panel-lbl{font-size:10px;font-family:var(--mono);color:var(--neon-cyan);width:72px;flex-shrink:0;font-weight:600;letter-spacing:2px;text-transform:uppercase;text-shadow:0 0 6px rgba(0,243,255,.4)}
 .slider-wrap{flex:1;position:relative;height:20px;display:flex;align-items:center}
-input[type=range]{width:100%;-webkit-appearance:none;height:2px;border-radius:0;background:rgba(0,243,255,.15);outline:none;touch-action:none;cursor:pointer}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:28px;border-radius:2px;background:var(--neon-cyan);cursor:pointer;box-shadow:0 0 8px rgba(0,243,255,.6);border:none}
+input[type=range]{width:100%;-webkit-appearance:none;appearance:none;height:4px;border-radius:2px;background:rgba(0,243,255,.25);outline:none;touch-action:pan-x;cursor:pointer;flex-shrink:0}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:24px;height:24px;border-radius:50%;background:var(--neon-cyan);cursor:pointer;box-shadow:0 0 8px rgba(0,243,255,.8);border:none;margin-top:-10px}
+input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;background:var(--neon-cyan);cursor:pointer;border:none}
 input[type=range]:disabled{opacity:.3}
 .slider-val{font-family:var(--mono);font-size:10px;color:var(--neon-cyan);width:36px;text-align:right;flex-shrink:0;text-shadow:0 0 6px rgba(0,243,255,.3)}
 .export-btn{height:34px;padding:0 14px;border-radius:3px;background:transparent;border:1px solid var(--neon-lime);color:var(--neon-lime);font-size:10px;font-weight:700;font-family:var(--mono);cursor:pointer;transition:all .13s;flex-shrink:0;letter-spacing:1.5px;text-transform:uppercase;text-shadow:0 0 8px rgba(177,240,0,.5)}
@@ -143,8 +144,9 @@ input[type=range]:disabled{opacity:.3}
 .np-step{width:30px;height:24px;border-radius:2px;border:1px solid rgba(0,243,255,.2);background:rgba(0,0,0,.5);color:var(--neon-cyan);font-size:10px;font-family:var(--mono);cursor:pointer;flex-shrink:0;transition:all .12s}
 .np-step:hover{background:rgba(0,243,255,.1);box-shadow:0 0 8px rgba(0,243,255,.15)}
 .np-step:active{transform:scale(.95)}
-input[type=range]{flex:1;-webkit-appearance:none;height:2px;border-radius:0;background:rgba(0,243,255,.15);outline:none;cursor:pointer;touch-action:none}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:28px;border-radius:2px;background:var(--neon-cyan);cursor:pointer;box-shadow:0 0 8px rgba(0,243,255,.6);border:none}
+input[type=range]{flex:1;-webkit-appearance:none;appearance:none;height:4px;border-radius:2px;background:rgba(0,243,255,.25);outline:none;cursor:pointer;touch-action:pan-x}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:24px;height:24px;border-radius:50%;background:var(--neon-cyan);cursor:pointer;box-shadow:0 0 8px rgba(0,243,255,.8);border:none;margin-top:-10px}
+input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;background:var(--neon-cyan);cursor:pointer;border:none}
 .np-val{font-family:var(--mono);font-size:10px;color:var(--neon-cyan);width:32px;text-align:right;flex-shrink:0;text-shadow:0 0 6px rgba(0,243,255,.3);letter-spacing:.5px}
 
 /* multi-select panel */
@@ -324,22 +326,16 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 
   <div class="bottom-panel">
-    <div class="panel-row">
-      <span class="panel-lbl">noise</span>
-      <div class="slider-wrap" style="max-width:33%">
-        <input type="range" id="nr-slider" min="0" max="100" value="0">
-      </div>
-      <span class="slider-val" id="nr-val">0%</span>
-      <span class="panel-lbl" style="margin-left:auto">rev time</span>
-      <div class="slider-wrap" style="max-width:22%">
-        <input type="range" id="reverb-time-slider" min="0" max="100" value="0">
-      </div>
-      <span class="slider-val" id="reverb-time-val">0%</span>
-      <span class="panel-lbl" style="margin-left:.5rem">rev mix</span>
-      <div class="slider-wrap" style="max-width:22%">
-        <input type="range" id="reverb-mix-slider" min="0" max="100" value="0">
-      </div>
-      <span class="slider-val" id="reverb-mix-val">0%</span>
+    <div class="panel-row" style="gap:.5rem">
+      <span class="panel-lbl" style="width:52px">NOISE</span>
+      <input type="range" id="nr-slider" min="0" max="100" value="0" style="flex:1;touch-action:none">
+      <span class="slider-val" id="nr-val" style="width:32px">0%</span>
+      <span class="panel-lbl" style="width:52px;margin-left:.5rem">REV T</span>
+      <input type="range" id="reverb-time-slider" min="0" max="100" value="0" style="flex:1;touch-action:none">
+      <span class="slider-val" id="reverb-time-val" style="width:32px">0%</span>
+      <span class="panel-lbl" style="width:52px;margin-left:.5rem">REV MX</span>
+      <input type="range" id="reverb-mix-slider" min="0" max="100" value="0" style="flex:1;touch-action:none">
+      <span class="slider-val" id="reverb-mix-val" style="width:32px">0%</span>
     </div>
     <div class="panel-row">
     <input type="range" id="q-slider" min="0" max="100" value="0" style="display:none">
