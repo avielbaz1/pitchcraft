@@ -176,17 +176,6 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
     <p>vocal pitch correction · PitchMe</p>
   </div>
   <div class="rec-card">
-    <div style="margin-bottom:.75rem">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem">
-        <span style="font-size:10px;font-family:var(--mono);letter-spacing:1px;color:var(--muted);text-transform:uppercase">sensitivity</span>
-        <span style="font-size:11px;font-family:var(--mono);color:var(--accent)" id="sens-label">medium</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:.5rem">
-        <span style="font-size:9px;font-family:var(--mono);color:var(--muted2)">legato</span>
-        <input type="range" id="sensitivity" min="1" max="5" value="3" step="1" style="flex:1">
-        <span style="font-size:9px;font-family:var(--mono);color:var(--muted2)">staccato</span>
-      </div>
-    </div>
     <div class="lbl">Record</div>
     <div class="vol-wrap"><div class="vol-bar" id="vol-bar"></div></div>
     <div class="rec-btn-wrap">
@@ -329,16 +318,16 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
   </div>
 
   <div class="bottom-panel">
-    <div class="panel-row" style="gap:.4rem;flex-wrap:nowrap">
-      <span class="panel-lbl" style="width:36px;letter-spacing:1px;font-size:9px">NR</span>
+    <div class="panel-row" style="gap:.3rem;flex-wrap:nowrap">
+      <span class="panel-lbl" style="width:22px;letter-spacing:0;font-size:9px;flex-shrink:0">NR</span>
       <div class="cslider-wrap"><div class="cslider-track" id="nr-slider-track"><div class="cslider-thumb" id="nr-slider-thumb"></div></div></div>
-      <span class="slider-val" id="nr-val" style="width:28px">0%</span>
-      <span class="panel-lbl" style="width:36px;letter-spacing:1px;font-size:9px;margin-left:.3rem">RT</span>
+      <span class="slider-val" id="nr-val" style="width:26px;font-size:9px">0%</span>
+      <span class="panel-lbl" style="width:22px;letter-spacing:0;font-size:9px;flex-shrink:0">RT</span>
       <div class="cslider-wrap"><div class="cslider-track" id="reverb-time-slider-track"><div class="cslider-thumb" id="reverb-time-slider-thumb"></div></div></div>
-      <span class="slider-val" id="reverb-time-val" style="width:28px">0%</span>
-      <span class="panel-lbl" style="width:36px;letter-spacing:1px;font-size:9px;margin-left:.3rem">RMX</span>
+      <span class="slider-val" id="reverb-time-val" style="width:26px;font-size:9px">0%</span>
+      <span class="panel-lbl" style="width:26px;letter-spacing:0;font-size:9px;flex-shrink:0">RMX</span>
       <div class="cslider-wrap"><div class="cslider-track" id="reverb-mix-slider-track"><div class="cslider-thumb" id="reverb-mix-slider-thumb"></div></div></div>
-      <span class="slider-val" id="reverb-mix-val" style="width:28px">0%</span>
+      <span class="slider-val" id="reverb-mix-val" style="width:26px;font-size:9px">0%</span>
     </div>
     <!-- Hidden range inputs for compatibility -->
     <input type="range" id="nr-slider" min="0" max="100" value="0" style="display:none">
@@ -635,6 +624,8 @@ async function loadAudioFromUrl(urlOrBuffer,name){
     const availH=(wrap?wrap.clientHeight:500)*1.15;
     const targetRowH=Math.floor(availH/Math.max(MIDI_RANGE,8));
     ROW_H=Math.max(22,Math.min(54,targetRowH));
+    // Boost vertical zoom: double ROW_H for clearer initial view on mobile
+    ROW_H=Math.min(ROW_H*2, 80);
     initEditorCanvas();
     drawEditor();
     updateMinimap();
@@ -650,13 +641,10 @@ function cloneBuffer(src){
 }
 
 // ══ SENSITIVITY SLIDER ═══════════════════════════════════════
-const sensSlider=document.getElementById('sensitivity');
-const sensLabel=document.getElementById('sens-label');
-const SENS_LABELS=['','legato','low','medium','high','staccato'];
-sensSlider.oninput=()=>{ sensLabel.textContent=SENS_LABELS[sensSlider.value]; };
+
 
 function getSensParams(){
-  const v=parseInt(sensSlider.value); // 1-5
+  const v=3; // fixed medium sensitivity (slider removed)
   return{
     sameNote:    [0, 0.9, 0.7, 0.5, 0.35, 0.25][v],
     confirmSm:   [0,   7,   5,   4,   3,   2][v], // for small jumps <1.5st
@@ -2687,10 +2675,11 @@ function applyNoiseReduction(srcBuffer, amount){
   const dst=ctx.createBuffer(srcBuffer.numberOfChannels,srcBuffer.length,sr);
   const BINS=FFT/2+1;
 
-  // minGain: at 100% still keeps a little residual so silence sounds natural
-  // noiseScale: how aggressively we treat measured noise — 3.5x at 100%
-  const minGain  = Math.max(0.02, 0.15*(1-amount));  // 0.15→0.02
-  const noiseScale = 1.0 + amount*2.5;               // 1.0→3.5
+  // minGain: uniform floor across entire buffer — prevents noise gate effect.
+  // At 100% NR: still keep 20% of noise floor so silences sound natural.
+  // noiseScale: 1.0→2.0 (was 3.5 — too aggressive, caused gate between notes)
+  const minGain    = Math.max(0.20, 1.0 - amount*0.80); // 1.0→0.20
+  const noiseScale = 1.0 + amount*1.0;                  // 1.0→2.0
 
   for(let ch=0;ch<srcBuffer.numberOfChannels;ch++){
     const src=srcBuffer.getChannelData(ch);
