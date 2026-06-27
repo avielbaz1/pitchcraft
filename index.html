@@ -330,14 +330,14 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
       <span class="slider-val" id="nr-val">0%</span>
       <span class="panel-lbl" style="margin-left:auto">rev time</span>
       <div class="slider-wrap" style="max-width:22%">
-        <input type="range" id="reverb-time-slider" min="0" max="100" value="0" disabled>
+        <input type="range" id="reverb-time-slider" min="0" max="100" value="0">
       </div>
-      <span class="slider-val" id="reverb-time-val" style="opacity:.4">0%</span>
+      <span class="slider-val" id="reverb-time-val">0%</span>
       <span class="panel-lbl" style="margin-left:.5rem">rev mix</span>
       <div class="slider-wrap" style="max-width:22%">
-        <input type="range" id="reverb-mix-slider" min="0" max="100" value="0" disabled>
+        <input type="range" id="reverb-mix-slider" min="0" max="100" value="0">
       </div>
-      <span class="slider-val" id="reverb-mix-val" style="opacity:.4">0%</span>
+      <span class="slider-val" id="reverb-mix-val">0%</span>
     </div>
     <div class="panel-row">
     <input type="range" id="q-slider" min="0" max="100" value="0" style="display:none">
@@ -1909,8 +1909,11 @@ window.addEventListener('mouseup',(e)=>{
   // ── Commit vertical pitch drag ──
   if(_vertDragNote){
     if(_vertDragMoved){
+      const draggedNote=_vertDragNote; // capture before null
       rebuildCorrectedBuffer();
       refreshNoteList();
+      // Play the corrected note so user hears the final pitch (not the preview)
+      playNote(draggedNote);
     }
     _vertDragNote=null; _vertDragMoved=false; _vertDragUndoPushed=false;
     edCanvas.style.cursor='crosshair';
@@ -2631,26 +2634,35 @@ function fftReal(re,im,n){
     }
   }
 }
+// ══ IMPROVED NOISE REDUCTION — Wiener filter ══════════════════
+// Uniform processing across entire buffer — no gating between notes.
+// minGain floor ensures inter-note silences keep natural residual noise.
 function applyNoiseReduction(srcBuffer, amount){
   if(amount<=0||!_noiseProfile) return srcBuffer;
   const sr=srcBuffer.sampleRate;
-  const FFT=2048, HOP=512;
-  // Use a temporary AudioContext in case main audioCtx isn't ready
+  const FFT=2048,HOP=512;
   const ctx=audioCtx||new(window.AudioContext||window.webkitAudioContext)({sampleRate:sr});
   const dst=ctx.createBuffer(srcBuffer.numberOfChannels,srcBuffer.length,sr);
+  const BINS=FFT/2+1;
+
+  // Minimum gain floor — same everywhere (during notes AND between them).
+  // This keeps inter-note gaps sounding natural instead of dead-silent.
+  const minGain=Math.max(0.08, 1-amount*0.85);
+  const noiseScale=amount*2.0;
 
   for(let ch=0;ch<srcBuffer.numberOfChannels;ch++){
     const src=srcBuffer.getChannelData(ch);
     const out=dst.getChannelData(ch);
-    out.set(src); // start from copy
-
+    out.set(src);
     const numFrames=Math.floor((src.length-FFT)/HOP);
     const outW=new Float32Array(src.length);
     const outWgt=new Float32Array(src.length);
+    const smoothPow=new Float32Array(BINS);
+    const alpha=0.90;
 
     for(let fi=0;fi<numFrames;fi++){
       const off=fi*HOP;
-      const re=new Float32Array(FFT), im=new Float32Array(FFT);
+      const re=new Float32Array(FFT),im=new Float32Array(FFT);
       const win=new Float32Array(FFT);
       for(let i=0;i<FFT;i++){
         win[i]=0.5*(1-Math.cos(2*Math.PI*i/(FFT-1)));
@@ -2658,34 +2670,104 @@ function applyNoiseReduction(srcBuffer, amount){
       }
       fftReal(re,im,FFT);
 
-      // Spectral subtraction: suppress each bin by amount * noiseProfile
-      const suppression=amount*1.8; // scale so 100% = near-full noise removal
-      for(let k=1;k<FFT/2;k++){
-        const mag=Math.sqrt(re[k]*re[k]+im[k]*im[k]);
-        const noise=_noiseProfile[k]*suppression;
-        // Soft-knee: smoothly reduce rather than hard-zero (avoids musical noise)
-        const gain=mag>noise ? 1-(noise/mag)*0.85 : 0.05;
-        re[k]*=gain; im[k]*=gain;
-        // Mirror bins
-        re[FFT-k]*=gain; im[FFT-k]*=gain;
+      for(let k=1;k<BINS;k++){
+        const mag2=re[k]*re[k]+im[k]*im[k];
+        smoothPow[k]=alpha*smoothPow[k]+(1-alpha)*mag2;
+        const noisePow=(_noiseProfile[k]*noiseScale)*(_noiseProfile[k]*noiseScale);
+        const snr=Math.max(0,(smoothPow[k]-noisePow)/Math.max(noisePow,1e-12));
+        const gain=snr/(snr+1);
+        // Uniform floor — not gate: same residual noise level everywhere
+        const g=minGain+(1-minGain)*gain;
+        re[k]*=g; im[k]*=g;
+        if(k<BINS-1){re[FFT-k]*=g; im[FFT-k]*=g;}
       }
 
-      // IFFT
       for(let i=0;i<FFT;i++) im[i]=-im[i];
       fftReal(re,im,FFT);
       for(let i=0;i<FFT;i++) re[i]/=FFT;
 
-      // Overlap-add with Hann window
       for(let i=0;i<FFT;i++){
         const idx=off+i; if(idx>=src.length) break;
         outW[idx]+=re[i]*win[i];
         outWgt[idx]+=win[i]*win[i];
       }
     }
-    // Normalize OLA
     for(let i=0;i<src.length;i++){
-      out[i]=outWgt[i]>1e-6 ? outW[i]/outWgt[i] : src[i];
+      out[i]=outWgt[i]>1e-6?outW[i]/outWgt[i]:src[i];
     }
+  }
+  return dst;
+}
+
+
+// ══ REVERB ENGINE — Algorithmic Schroeder/Moorer ══════════════
+// Uses comb + allpass filters — runs in JS, no impulse response needed.
+// reverbTime: 0–1 (maps to ~0.3–3s RT60)
+// reverbMix: 0–1 (wet/dry)
+let _reverbTime=0;
+let _reverbMix=0;
+
+function applyReverb(srcBuffer, reverbTime, mix){
+  if(mix<=0) return srcBuffer;
+  const sr=srcBuffer.sampleRate;
+  const rt60=0.3+reverbTime*2.7; // 0.3s – 3.0s
+  const ctx=audioCtx||new(window.AudioContext||window.webkitAudioContext)({sampleRate:sr});
+  const dst=ctx.createBuffer(srcBuffer.numberOfChannels,srcBuffer.length,sr);
+
+  // Comb filter delays (prime-number based to avoid flutter)
+  const combDelays=[1687,1601,2053,2251]; // samples @ 44100
+  const apDelays=[241,83];
+
+  for(let ch=0;ch<srcBuffer.numberOfChannels;ch++){
+    const src=srcBuffer.getChannelData(ch);
+    const out=new Float32Array(src.length);
+
+    // Scale delays for actual sample rate
+    const scale=sr/44100;
+    const cDelays=combDelays.map(d=>Math.round(d*scale));
+    const aDelays=apDelays.map(d=>Math.round(d*scale));
+
+    // Parallel comb filters
+    const combOut=new Float32Array(src.length);
+    for(const dlen of cDelays){
+      const buf=new Float32Array(dlen);
+      // g = 10^(-3*delay/rt60) → standard RT60 formula
+      const g=Math.pow(10,-3*dlen/(sr*rt60));
+      let pos=0;
+      const cOut=new Float32Array(src.length);
+      for(let i=0;i<src.length;i++){
+        const delayed=buf[pos];
+        buf[pos]=src[i]+delayed*g;
+        pos=(pos+1)%dlen;
+        cOut[i]=delayed;
+      }
+      for(let i=0;i<src.length;i++) combOut[i]+=cOut[i]*0.25;
+    }
+
+    // Series allpass filters (diffusion)
+    let ap=combOut;
+    for(const dlen of aDelays){
+      const buf=new Float32Array(dlen);
+      const g=0.7;
+      let pos=0;
+      const aOut=new Float32Array(src.length);
+      for(let i=0;i<ap.length;i++){
+        const delayed=buf[pos];
+        const w=ap[i]-g*delayed;
+        buf[pos]=w;
+        pos=(pos+1)%dlen;
+        aOut[i]=delayed+g*w;
+      }
+      ap=aOut;
+    }
+
+    // Mix dry+wet
+    const wet=mix;
+    const dry=1-mix*0.5; // never fully remove dry signal
+    for(let i=0;i<src.length;i++){
+      out[i]=src[i]*dry+ap[i]*wet;
+    }
+    dst.getChannelData(ch).set(out);
   }
   return dst;
 }
@@ -2704,128 +2786,208 @@ nrSlider.onchange=()=>{
   rebuildCorrectedBuffer();
   drawEditor();
 };
+
+// ── Reverb sliders ──
+const reverbTimeSlider=document.getElementById('reverb-time-slider');
+const reverbTimeVal=document.getElementById('reverb-time-val');
+const reverbMixSlider=document.getElementById('reverb-mix-slider');
+const reverbMixVal=document.getElementById('reverb-mix-val');
+reverbTimeSlider.oninput=()=>{
+  reverbTimeVal.textContent=reverbTimeSlider.value+'%';
+};
+reverbTimeSlider.onchange=()=>{
+  _reverbTime=parseInt(reverbTimeSlider.value)/100;
+  reverbTimeVal.textContent=reverbTimeSlider.value+'%';
+  if(originalBuffer) rebuildCorrectedBuffer();
+  drawEditor();
+};
+reverbMixSlider.oninput=()=>{
+  reverbMixVal.textContent=reverbMixSlider.value+'%';
+};
+reverbMixSlider.onchange=()=>{
+  _reverbMix=parseInt(reverbMixSlider.value)/100;
+  reverbMixVal.textContent=reverbMixSlider.value+'%';
+  if(originalBuffer) rebuildCorrectedBuffer();
+  drawEditor();
+};
+// ══ PSOLA PITCH SHIFTER ════════════════════════════════════════
+// Two independent counters: inMark (T0) and outMark (T_out = T0/ratio).
+// OLA normalization: divide by sum(w) not sum(w^2) — eliminates amplitude spikes.
+function pitchShift(src, pitchRatio, outLen){
+  if(Math.abs(pitchRatio-1)<0.0005){
+    const r=new Float32Array(outLen||src.length);
+    r.set(src.subarray(0,r.length)); return r;
+  }
+
+  const N   = src.length;
+  const OUT = outLen||N;
+
+  // ── Find T0 via normalized autocorrelation ──────────────────
+  const midS  = Math.floor(N*0.25);
+  const WIN   = Math.min(4096, Math.floor(N*0.5));
+  const minLag= Math.max(16,  Math.round(44100/800)); // 800Hz max
+  const maxLag= Math.min(512, Math.round(44100/60),   Math.floor(WIN/2));
+
+  let bestLag=100, bestCorr=-2;
+  const seg=src.subarray(midS, midS+WIN);
+  let e0=0; for(let i=0;i<WIN;i++) e0+=seg[i]*seg[i];
+  e0=Math.max(e0,1e-10);
+
+  for(let lag=minLag; lag<=maxLag; lag++){
+    let c=0,e1=0;
+    for(let i=0;i<WIN-lag;i++){ c+=seg[i]*seg[i+lag]; e1+=seg[i+lag]*seg[i+lag]; }
+    const r=c/Math.sqrt(e0*Math.max(e1,1e-10));
+    if(r>bestCorr){ bestCorr=r; bestLag=lag; }
+  }
+  // Parabolic refinement
+  if(bestLag>minLag&&bestLag<maxLag){
+    const ym=psolaCorr(seg,WIN,e0,bestLag-1);
+    const yp=psolaCorr(seg,WIN,e0,bestLag+1);
+    const d=2*(2*bestCorr-ym-yp);
+    if(Math.abs(d)>1e-6)
+      bestLag=Math.max(minLag,Math.min(maxLag,Math.round(bestLag+(yp-ym)/d)));
+  }
+  const T0=bestLag;
+
+  // ── PSOLA synthesis ─────────────────────────────────────────
+  const T_out  = Math.max(1, Math.round(T0/pitchRatio));
+  const halfWin= T0;
+  const winLen = halfWin*2;
+  const win    = new Float32Array(winLen);
+  for(let i=0;i<winLen;i++) win[i]=0.5*(1-Math.cos(2*Math.PI*i/(winLen-1)));
+
+  const out=new Float32Array(OUT);
+  const wgt=new Float32Array(OUT);
+
+  let inMark=0, outMark=0;
+  while(outMark<OUT){
+    for(let i=-halfWin; i<halfWin; i++){
+      const si=inMark+i, di=outMark+i;
+      if(si<0||si>=N||di<0||di>=OUT) continue;
+      const w=win[i+halfWin];
+      out[di]+=src[si]*w;
+      wgt[di]+=w;            // sum(w) — NOT sum(w^2)
+    }
+    inMark +=T0;
+    outMark+=T_out;
+  }
+
+  // Normalize — where coverage drops below 0.5 (end of buffer),
+  // fade linearly to 0 instead of dividing by tiny weight → no end click
+  const MIN_WGT=0.5;
+  let lastGoodVal=0, lastGoodIdx=0;
+  for(let i=0;i<OUT;i++){
+    if(wgt[i]>=MIN_WGT){
+      let v=out[i]/wgt[i];
+      if(v> 1) v= 1;
+      if(v<-1) v=-1;
+      out[i]=v;
+      lastGoodVal=v;
+      lastGoodIdx=i;
+    } else {
+      // Fade toward 0 over one pitch period — prevents click at end
+      const dist=i-lastGoodIdx;
+      const fade=Math.max(0, 1-dist/halfWin);
+      out[i]=lastGoodVal*fade;
+    }
+  }
+  return out;
+}
+
+function psolaCorr(seg,n,e0,lag){
+  let c=0,e1=0;
+  for(let i=0;i<n-lag;i++){c+=seg[i]*seg[i+lag];e1+=seg[i+lag]*seg[i+lag];}
+  return c/Math.sqrt(e0*Math.max(e1,1e-10));
+}
+
 function rebuildCorrectedBuffer(){
   if(!originalBuffer)return;
   correctedBuffer=cloneBuffer(originalBuffer);
   const sr=originalBuffer.sampleRate;
-  const FADE=Math.floor(sr*0.020); // 20ms crossfade (was 8ms)
+  // Longer crossfade = smoother boundaries. 40ms is enough to hide
+  // any phase vocoder frame boundary without audible blur.
+  const FADE=Math.floor(sr*0.020); // 20ms — one pitch period, enough for PSOLA to settle
 
   notes.forEach(n=>{
     const hasShift=Math.abs(n.tuneOffset)>0.005;
     const hasVibrato=(n.vibratoReduction||0)>0;
     if(!hasShift&&!hasVibrato)return;
-
     const start=Math.floor(n.startSample);
     const end=Math.min(Math.ceil(n.endSample),originalBuffer.length);
     const segLen=end-start;
-    if(segLen<1)return;
+    if(segLen<128)return;
 
-    // Vibrato reduction builds a per-sample ratio array. Without vibrato, the ratio
-    // is constant (2^(tuneOffset/12)). With vibrato, we add a time-varying delta that
-    // flattens pitch excursions while preserving the average pitch.
-    let ratioArray=null; // null = use constant ratio below
+    // Build per-sample ratio array for vibrato reduction
+    let ratioArray=null;
     if(hasVibrato){
       const vAmt=(n.vibratoReduction||0)/100;
       const src0=originalBuffer.getChannelData(0);
-      // Track pitch per frame inside the segment.
       const WIN=1024,HOP=256;
-      const pitches=[]; // {t:centerSample, midi} for each voiced frame
+      const pitches=[];
       for(let i=start;i+WIN<end;i+=HOP){
         const sl=src0.slice(i,i+WIN);
         const{freq,rms}=detectPitch(sl,sr);
-        if(freq>0&&rms>0.003) pitches.push({t:i+WIN/2, midi:f2midi(freq)});
+        if(freq>0&&rms>0.003) pitches.push({t:i+WIN/2,midi:f2midi(freq)});
       }
       if(pitches.length>=3){
-        // Average midi across the note — the "stable center pitch"
         const avgMidi=pitches.reduce((s,p)=>s+p.midi,0)/pitches.length;
-        // Build a per-sample ratio: flatten the deviation from avg by vAmt.
-        //   per-frame deviation = midi[i] - avgMidi
-        //   we want new pitch = midi[i] - deviation*vAmt = midi[i]*(1-vAmt) + avgMidi*vAmt
-        //   shift needed     = new - midi[i] = -deviation*vAmt
-        //   plus the user's tuneOffset on top
         ratioArray=new Float32Array(segLen);
         let pIdx=0;
         for(let i=0;i<segLen;i++){
           const absPos=start+i;
-          // advance pIdx so pitches[pIdx].t <= absPos < pitches[pIdx+1].t
-          while(pIdx<pitches.length-2 && pitches[pIdx+1].t<=absPos) pIdx++;
-          const p0=pitches[pIdx], p1=pitches[Math.min(pIdx+1,pitches.length-1)];
+          while(pIdx<pitches.length-2&&pitches[pIdx+1].t<=absPos) pIdx++;
+          const p0=pitches[pIdx],p1=pitches[Math.min(pIdx+1,pitches.length-1)];
           const span=Math.max(1,p1.t-p0.t);
           const frac=Math.max(0,Math.min(1,(absPos-p0.t)/span));
           const curMidi=p0.midi*(1-frac)+p1.midi*frac;
-          const flatten=-(curMidi-avgMidi)*vAmt;   // semitones to shift to flatten
-          const totalSemitones=n.tuneOffset+flatten;
-          ratioArray[i]=Math.pow(2,totalSemitones/12);
+          const flatten=-(curMidi-avgMidi)*vAmt;
+          ratioArray[i]=Math.pow(2,(n.tuneOffset+flatten)/12);
         }
       }
     }
     const constRatio=Math.pow(2,n.tuneOffset/12);
+    const avgRatio=ratioArray
+      ? ratioArray.reduce((s,v)=>s+v,0)/ratioArray.length
+      : constRatio;
 
     for(let ch=0;ch<originalBuffer.numberOfChannels;ch++){
       const src=originalBuffer.getChannelData(ch);
       const dst=correctedBuffer.getChannelData(ch);
+      const seg=src.slice(start,end);
 
-      // Build shifted segment. When vibrato reduction is on, ratio varies per sample.
-      // Use a phase accumulator so the output timebase remains continuous across
-      // varying ratios (no clicks from ratio jumps).
-      const tmp=new Float32Array(segLen);
-      let srcPos=0;
-      for(let i=0;i<segLen;i++){
-        const r=ratioArray?ratioArray[i]:constRatio;
-        const srcIdx=start+srcPos;
-        const si=Math.floor(srcIdx);
-        const frac=srcIdx-si;
-        tmp[i]=si+1<src.length?(1-frac)*src[si]+frac*src[si+1]:src[Math.min(si,src.length-1)];
-        srcPos+=r;
-        if(srcPos>=segLen) srcPos=segLen-1;
-      }
+      // PSOLA pitch shift — time domain, preserves formants
+      const shifted=pitchShift(seg, avgRatio, segLen);
 
-      // ── Time-stretch tmp back to segLen so duration is preserved ──
-      // Use the actual pitch ratio (not srcPos which is just the last read position).
-      // stretchRatio = how compressed/expanded the pitched audio is vs original.
-      const avgRatio=ratioArray
-        ? ratioArray.reduce((s,v)=>s+v,0)/ratioArray.length
-        : constRatio;
-      const stretched=new Float32Array(segLen);
-      for(let i=0;i<segLen;i++){
-        // map output sample i → position in tmp (which has length segLen but only
-        // avgRatio*segLen valid pitched samples)
-        const sp=i*avgRatio;
-        const si2=Math.floor(sp);
-        const fr=sp-si2;
-        const a=si2<tmp.length?tmp[si2]:0;
-        const b=si2+1<tmp.length?tmp[si2+1]:a;
-        stretched[i]=(1-fr)*a+fr*b;
-      }
-
-      // vibrato reduction: blend toward segment-average pitch (smoothed copy)
-      // (vibrato reduction is now handled via the time-varying ratio array above —
-      //  no post-processing of sample values here)
-
-      // crossfade at start
-      const fadeIn=Math.min(FADE,segLen/2);
+      // Full-cosine crossfade — smoothest possible transition, no discontinuity
+      const maxFade=Math.floor(segLen/3);
+      const fadeIn=Math.min(FADE, maxFade);
+      const fadeOut=Math.min(FADE, maxFade);
       for(let i=0;i<fadeIn;i++){
-        const t=i/fadeIn;
-        dst[start+i]=src[start+i]*(1-t)+stretched[i]*t;
+        const w=0.5*(1-Math.cos(Math.PI*i/fadeIn)); // 0→1 smooth
+        dst[start+i]=src[start+i]*(1-w)+shifted[i]*w;
       }
-      // middle
-      for(let i=fadeIn;i<segLen-fadeIn;i++) dst[start+i]=stretched[i];
-      // crossfade at end
-      const fadeOut=Math.min(FADE,segLen/2);
+      for(let i=fadeIn;i<segLen-fadeOut;i++) dst[start+i]=shifted[i];
       for(let i=0;i<fadeOut;i++){
-        const t=i/fadeOut;
+        const w=0.5*(1+Math.cos(Math.PI*i/fadeOut)); // 1→0 smooth
         const pos=segLen-fadeOut+i;
-        dst[start+pos]=stretched[pos]*(1-t)+src[start+pos]*t;
+        dst[start+pos]=shifted[pos]*w+src[start+pos]*(1-w);
       }
     }
   });
-  // Apply noise reduction on top of pitch corrections
+
+  // Apply noise reduction
   if(_nrAmount>0){
     if(!_noiseProfile&&originalBuffer){
       _noiseProfile=buildNoiseProfile(originalBuffer.getChannelData(0),originalBuffer.sampleRate);
     }
     correctedBuffer=applyNoiseReduction(correctedBuffer,_nrAmount);
   }
+
+  // Apply reverb
+  if(_reverbMix>0&&_reverbTime>0){
+    correctedBuffer=applyReverb(correctedBuffer,_reverbTime,_reverbMix);
+  }
+
   updateMinimap();
 }
 
@@ -3092,6 +3254,9 @@ document.getElementById('back-btn').onclick=()=>{
   _noiseProfile=null;_nrAmount=0;
   if(document.getElementById('nr-slider')) document.getElementById('nr-slider').value=0;
   if(document.getElementById('nr-val')) document.getElementById('nr-val').textContent='0%';
+  _reverbTime=0;_reverbMix=0;
+  if(document.getElementById('reverb-time-slider')){document.getElementById('reverb-time-slider').value=0;document.getElementById('reverb-time-val').textContent='0%';}
+  if(document.getElementById('reverb-mix-slider')){document.getElementById('reverb-mix-slider').value=0;document.getElementById('reverb-mix-val').textContent='0%';}
   allChunks=[];chunkCount=0;
   videoSourceFile=null;videoSourceName='';
   recTimer.textContent='';
