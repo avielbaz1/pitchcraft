@@ -388,7 +388,7 @@ function detectPitch(buf, sr) {
   const minP = Math.floor(sr / 1100);
   const maxP = Math.min(Math.ceil(sr / 38), Math.floor(n / 2));
 
-  // 1. Difference function
+  // 1. Difference function + CMND
   const diff = new Float32Array(maxP + 1);
   const sos  = new Float32Array(n + 1);
   for (let i = 0; i < n; i++) sos[i+1] = sos[i] + buf[i]*buf[i];
@@ -397,8 +397,6 @@ function detectPitch(buf, sr) {
     for (let i = 0; i < n - tau; i++) acf += buf[i] * buf[i+tau];
     diff[tau] = sos[n-tau] + (sos[n]-sos[tau]) - 2*acf;
   }
-
-  // 2. CMND
   const cmnd = new Float32Array(maxP + 1); cmnd[0] = 1;
   let run = 0;
   for (let tau = 1; tau <= maxP; tau++) {
@@ -406,39 +404,74 @@ function detectPitch(buf, sr) {
     cmnd[tau] = run === 0 ? 1 : diff[tau] / ((1/tau) * run);
   }
 
-  // 3. First dip below threshold
-  const THR = 0.18;
+  // 2. Collect ALL dips as pitch candidates
+  const THR = 0.20;
   const dips = [];
   for (let tau = minP+1; tau < maxP; tau++)
-    if (cmnd[tau] < cmnd[tau-1] && cmnd[tau] < cmnd[tau+1]) dips.push({ tau, val: cmnd[tau] });
+    if (cmnd[tau] < cmnd[tau-1] && cmnd[tau] < cmnd[tau+1])
+      dips.push({ tau, val: cmnd[tau] });
 
-  let bestL = -1;
-  if (dips.length > 0) {
-    let early = -1;
-    for (const d of dips) { if (d.val < THR) { early = d.tau; break; } }
-    if (early !== -1) {
-      bestL = early;
-      for (const d of dips) {
-        if (d.tau > early*1.8 && d.tau < early*4.2 && d.val < cmnd[Math.floor(early)]*0.5) { bestL = d.tau; break; }
+  if (!dips.length) {
+    let mv = 1, bi = -1;
+    for (let tau = minP; tau <= maxP; tau++) if (cmnd[tau] < mv) { mv = cmnd[tau]; bi = tau; }
+    if (mv > 0.5 || bi < 0) return { freq: -1, rms };
+    dips.push({ tau: bi, val: mv });
+  }
+
+  // 3. Parabolic refinement for each candidate
+  const cands = dips.filter(d => d.val < THR).slice(0, 8);
+  if (!cands.length) cands.push(dips.reduce((a,b) => b.val < a.val ? b : a));
+
+  const refined = cands.map(d => {
+    let tau = d.tau;
+    if (tau > minP && tau < maxP) {
+      const v1=cmnd[tau-1], v2=cmnd[tau], v3=cmnd[tau+1];
+      const den = v1 - 2*v2 + v3;
+      if (Math.abs(den) > 1e-6) tau += 0.5*(v1-v3)/den;
+    }
+    return { tau, val: d.val, freq: sr/tau };
+  }).filter(c => c.freq >= 38 && c.freq <= 1100);
+
+  if (!refined.length) return { freq: -1, rms };
+
+  // 4. Octave disambiguation:
+  //    For each candidate, check if any OTHER candidate is near an octave below.
+  //    Prefer the LOWER octave when the sub-harmonic has similar CMND score.
+  //    This prevents the classic YIN "octave too high" error.
+  let best = refined[0];
+  for (const c of refined) {
+    // Prefer lower frequency if a sub-harmonic exists with val < 0.35
+    const subHarmTau = c.tau * 2;
+    if (subHarmTau <= maxP) {
+      const shVal = cmnd[Math.min(Math.round(subHarmTau), maxP)];
+      // If the octave-below period also has a strong dip, the lower freq is real
+      if (shVal < 0.35 && c.freq * 2 < 1100) {
+        // Lower frequency candidate is more credible — prefer it
+        const lower = refined.find(r => Math.abs(r.freq - c.freq/2) < c.freq*0.08);
+        if (lower) { best = lower; break; }
       }
-    } else {
-      bestL = dips.reduce((a,b) => b.val < a.val ? b : a).tau;
+    }
+    // Also: among candidates, if one has freq < 400Hz and val < 0.25, strongly prefer it
+    if (c.freq < 400 && c.val < 0.25 && c.val < best.val * 1.3) { best = c; }
+  }
+
+  // 5. Sub-harmonic check: if best is likely an octave too high
+  //    (sub-harmonic tau in range AND has reasonable cmnd), shift down.
+  const subTau = Math.round(best.tau * 2);
+  if (subTau <= maxP) {
+    const subVal = cmnd[subTau];
+    const subFreq = sr / subTau;
+    if (subFreq >= 38 && subVal < 0.30 && subVal < best.val * 1.8) {
+      // Sub-harmonic is strong enough — use it (prevents octave-too-high)
+      let tau2 = subTau;
+      const v1=cmnd[tau2-1]||1, v2=cmnd[tau2], v3=cmnd[tau2+1]||1;
+      const den = v1-2*v2+v3;
+      if (Math.abs(den) > 1e-6) tau2 += 0.5*(v1-v3)/den;
+      best = { tau: tau2, val: subVal, freq: sr/tau2 };
     }
   }
-  if (bestL === -1) {
-    let mv = 1; for (let tau = minP; tau <= maxP; tau++) if (cmnd[tau] < mv) { mv = cmnd[tau]; bestL = tau; }
-    if (mv > 0.5) return { freq: -1, rms };
-  }
 
-  // 4. Parabolic refinement
-  if (bestL > minP && bestL < maxP) {
-    const v1=cmnd[Math.floor(bestL)-1], v2=cmnd[Math.floor(bestL)], v3=cmnd[Math.floor(bestL)+1];
-    const den = v1 - 2*v2 + v3;
-    if (Math.abs(den) > 1e-6) bestL += 0.5*(v1-v3)/den;
-  }
-
-  const freq = sr / bestL;
-  return { freq: (freq > 38 && freq < 1200) ? freq : -1, rms };
+  return { freq: (best.freq >= 38 && best.freq <= 1100) ? best.freq : -1, rms };
 }
 
 // ══ SCREEN MANAGEMENT ════════════════════════════════════════
@@ -856,26 +889,50 @@ async function analyzeBuffer(buf, onProgress) {
     merged.push(cur); notes = merged;
   }
 
-  // Pass 5 — octave continuity with global median anchor
+  // Pass 5 — octave continuity: multi-pass correction anchored to global median
   {
     const allM = [...notes].map(n=>n.midi).sort((a,b)=>a-b);
     const gMed = allM.length ? allM[Math.floor(allM.length/2)] : 60;
-    for (let pass = 0; pass < 4; pass++) {
+
+    // Also use liveFreqs (recorded during capture) as a strong anchor if available
+    let liveMedianMidi = gMed;
+    if (typeof liveFreqs !== 'undefined' && liveFreqs.length > 4) {
+      const lm = liveFreqs.filter(f=>f>38&&f<1100).map(f=>f2midi(f)).sort((a,b)=>a-b);
+      if (lm.length) liveMedianMidi = lm[Math.floor(lm.length/2)];
+    }
+    const anchor = (Math.abs(liveMedianMidi-gMed) < 6) ? (liveMedianMidi*0.6+gMed*0.4) : gMed;
+
+    // 8 passes — enough to propagate corrections through a full song
+    for (let pass = 0; pass < 8; pass++) {
       for (let n = 0; n < notes.length; n++) {
+        // Build context: nearby notes weighted by proximity, plus global anchor
         const ctx = [];
-        if (n>1)              ctx.push(notes[n-2].midi);
-        if (n>0)              ctx.push(notes[n-1].midi, notes[n-1].midi);
-        if (n<notes.length-1) ctx.push(notes[n+1].midi, notes[n+1].midi);
-        if (n<notes.length-2) ctx.push(notes[n+2].midi);
-        ctx.push(gMed);
+        const W = 4; // window radius
+        for (let k = Math.max(0,n-W); k <= Math.min(notes.length-1,n+W); k++) {
+          if (k === n) continue;
+          const dist = Math.abs(k-n);
+          const weight = W+1-dist; // closer notes count more
+          for (let w=0;w<weight;w++) ctx.push(notes[k].midi);
+        }
+        // Anchor counts as 2 votes
+        ctx.push(anchor); ctx.push(anchor);
         ctx.sort((a,b)=>a-b);
         const med = ctx[Math.floor(ctx.length/2)];
-        const d = Math.abs(notes[n].midi - med);
-        if (d >= 5 && d <= 17) {
-          const dD = Math.abs((notes[n].midi-12)-med);
-          const dU = Math.abs((notes[n].midi+12)-med);
-          if (dD < d && dD < dU) { notes[n].midi -= 12; notes[n].midiOrig -= 12; notes[n].freq = midi2f(notes[n].midi); notes[n].cents = Math.round((notes[n].midi-snapMidi(notes[n].midi))*100); }
-          else if (dU < d)       { notes[n].midi += 12; notes[n].midiOrig += 12; notes[n].freq = midi2f(notes[n].midi); notes[n].cents = Math.round((notes[n].midi-snapMidi(notes[n].midi))*100); }
+        const d = notes[n].midi - med;
+        const dAbs = Math.abs(d);
+
+        // Check all octave shifts: -24,-12,+12,+24 semitones
+        const shifts = [-24,-12,12,24];
+        let bestShift = 0, bestDist = dAbs;
+        for (const s of shifts) {
+          const dist = Math.abs(d - s);
+          if (dist < bestDist && dist < 4.5) { bestDist = dist; bestShift = s; }
+        }
+        if (bestShift !== 0) {
+          notes[n].midi      -= bestShift;
+          notes[n].midiOrig  -= bestShift;
+          notes[n].freq       = midi2f(notes[n].midi);
+          notes[n].cents      = Math.round((notes[n].midi-snapMidi(notes[n].midi))*100);
         }
       }
     }
