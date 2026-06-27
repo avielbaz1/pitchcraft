@@ -3067,8 +3067,6 @@ function rebuildCorrectedBuffer(){
   const sr=originalBuffer.sampleRate;
   // 40ms crossfade — enough for any voice fundamental (down to ~80Hz = 12ms period)
   // Must cover at least 3 pitch periods to avoid amplitude modulation artifacts
-  const FADE=Math.floor(sr*0.040);
-
   // Track the last absolute position written per channel,
   // so adjacent notes never overwrite each other's crossfade regions.
   const lastWritten = new Array(originalBuffer.numberOfChannels).fill(-1);
@@ -3123,39 +3121,39 @@ function rebuildCorrectedBuffer(){
       // PSOLA pitch shift
       const shifted=pitchShift(seg, avgRatio, segLen);
 
-      // Find last well-covered sample
+      // Find last PSOLA-covered sample
       let lastGood=segLen-1;
       while(lastGood>0 && Math.abs(shifted[lastGood])<1e-6 && Math.abs(shifted[lastGood-1])<1e-6)
         lastGood--;
 
-      // Clamp fadeIn start to not overwrite previous note's fadeOut
-      // lastWritten[ch] is the last absolute position written by the previous note.
-      const safeStart = Math.max(start, lastWritten[ch]+1);
-      const safeOffset = safeStart - start; // how many samples to skip at start
+      // Safe write boundaries: never write into adjacent note's territory
+      const safeStart  = Math.max(start, lastWritten[ch]+1);
+      const safeOffset = safeStart - start;
+      const writeStart = Math.max(0, safeOffset);
+      const writeEnd   = lastGood;
 
-      // Fade-in: src→shifted (only from safeStart onward)
-      const maxFadeIn = Math.min(FADE, Math.floor(segLen/4));
-      for(let i=safeOffset; i<maxFadeIn; i++){
-        const w = 0.5*(1-Math.cos(Math.PI*(i-safeOffset)/(maxFadeIn-safeOffset+1)));
-        dst[start+i] = src[start+i]*(1-w) + shifted[i]*w;
+      // Simple approach: write shifted directly, no crossfade.
+      // PSOLA already produces a smooth signal — the crossfade itself
+      // was creating discontinuities at its boundaries.
+      // We pad with a short linear ramp only at the very first/last samples
+      // to avoid DC offset jumps.
+      const RAMP = Math.min(64, Math.floor(segLen/8)); // ~1.5ms
+      for(let i=writeStart; i<=writeEnd; i++){
+        let s = shifted[i];
+        // Tiny ramp at note start
+        if(i < writeStart+RAMP){
+          const t=(i-writeStart)/RAMP;
+          s = src[start+i]*(1-t) + s*t;
+        }
+        // Tiny ramp at note end
+        if(i > writeEnd-RAMP){
+          const t=(writeEnd-i)/RAMP;
+          s = src[start+i]*(1-t) + s*t;
+        }
+        dst[start+i] = s;
       }
 
-      // Middle: pure shifted
-      for(let i=maxFadeIn; i<lastGood-FADE; i++) dst[start+i]=shifted[i];
-
-      // Fade-out: shifted→src
-      const fadeOutLen = Math.min(FADE, Math.max(0, lastGood - maxFadeIn));
-      const fadeOutStart = lastGood - fadeOutLen;
-      for(let i=0; i<fadeOutLen; i++){
-        const w = 0.5*(1+Math.cos(Math.PI*i/fadeOutLen));
-        const pos = fadeOutStart+i;
-        if(pos>=0 && pos<segLen) dst[start+pos]=shifted[pos]*w+src[start+pos]*(1-w);
-      }
-      // Fill tail with original
-      for(let i=lastGood; i<segLen; i++) dst[start+i]=src[start+i];
-
-      // Record last absolute position we wrote
-      lastWritten[ch] = start + lastGood;
+      lastWritten[ch] = start + writeEnd;
     }
   });
 
