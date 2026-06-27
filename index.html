@@ -105,6 +105,9 @@ html,body{background:var(--bg);color:var(--text);font-family:var(--sans);height:
 
 /* bottom panel */
 .bottom-panel{background:var(--s1);border-top:1px solid rgba(0,243,255,.1);padding:.65rem 1rem;flex-shrink:0}
+.cslider-wrap{flex:1;height:28px;display:flex;align-items:center;cursor:pointer;min-width:40px}
+.cslider-track{position:relative;width:100%;height:4px;background:rgba(0,243,255,.2);border-radius:2px}
+.cslider-thumb{position:absolute;top:50%;width:20px;height:20px;border-radius:50%;background:var(--neon-cyan);box-shadow:0 0 8px rgba(0,243,255,.8);transform:translate(-50%,-50%);left:0%;cursor:grab;touch-action:none}
 .panel-row{display:flex;align-items:center;gap:.75rem;margin-bottom:.5rem}
 .panel-row:last-child{margin-bottom:0}
 .panel-lbl{font-size:10px;font-family:var(--mono);color:var(--neon-cyan);width:72px;flex-shrink:0;font-weight:600;letter-spacing:2px;text-transform:uppercase;text-shadow:0 0 6px rgba(0,243,255,.4)}
@@ -326,17 +329,21 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
   </div>
 
   <div class="bottom-panel">
-    <div class="panel-row" style="gap:.5rem">
-      <span class="panel-lbl" style="width:52px">NOISE</span>
-      <input type="range" id="nr-slider" min="0" max="100" value="0" style="flex:1;touch-action:none">
-      <span class="slider-val" id="nr-val" style="width:32px">0%</span>
-      <span class="panel-lbl" style="width:52px;margin-left:.5rem">REV T</span>
-      <input type="range" id="reverb-time-slider" min="0" max="100" value="0" style="flex:1;touch-action:none">
-      <span class="slider-val" id="reverb-time-val" style="width:32px">0%</span>
-      <span class="panel-lbl" style="width:52px;margin-left:.5rem">REV MX</span>
-      <input type="range" id="reverb-mix-slider" min="0" max="100" value="0" style="flex:1;touch-action:none">
-      <span class="slider-val" id="reverb-mix-val" style="width:32px">0%</span>
+    <div class="panel-row" style="gap:.4rem;flex-wrap:nowrap">
+      <span class="panel-lbl" style="width:36px;letter-spacing:1px;font-size:9px">NR</span>
+      <div class="cslider-wrap"><div class="cslider-track" id="nr-slider-track"><div class="cslider-thumb" id="nr-slider-thumb"></div></div></div>
+      <span class="slider-val" id="nr-val" style="width:28px">0%</span>
+      <span class="panel-lbl" style="width:36px;letter-spacing:1px;font-size:9px;margin-left:.3rem">RT</span>
+      <div class="cslider-wrap"><div class="cslider-track" id="reverb-time-slider-track"><div class="cslider-thumb" id="reverb-time-slider-thumb"></div></div></div>
+      <span class="slider-val" id="reverb-time-val" style="width:28px">0%</span>
+      <span class="panel-lbl" style="width:36px;letter-spacing:1px;font-size:9px;margin-left:.3rem">RMX</span>
+      <div class="cslider-wrap"><div class="cslider-track" id="reverb-mix-slider-track"><div class="cslider-thumb" id="reverb-mix-slider-thumb"></div></div></div>
+      <span class="slider-val" id="reverb-mix-val" style="width:28px">0%</span>
     </div>
+    <!-- Hidden range inputs for compatibility -->
+    <input type="range" id="nr-slider" min="0" max="100" value="0" style="display:none">
+    <input type="range" id="reverb-time-slider" min="0" max="100" value="0" style="display:none">
+    <input type="range" id="reverb-mix-slider" min="0" max="100" value="0" style="display:none">
     <div class="panel-row">
     <input type="range" id="q-slider" min="0" max="100" value="0" style="display:none">
     <span id="q-val" style="display:none">0%</span>
@@ -2601,10 +2608,6 @@ qSlider.addEventListener('change',commitQuantizePreview);
 // "Apply Correction" button: bake the current state as the new baseline.
 // From this point on, the slider will start measuring from this state (not the pre-edit one).
 // ══ NOISE REDUCER ════════════════════════════════════════════
-// Spectral Subtraction: estimate noise floor from quietest frames,
-// then subtract it from every frame. Simple, fast, no artifacts at low amounts.
-const nrSlider=document.getElementById('nr-slider');
-const nrVal=document.getElementById('nr-val');
 let _nrAmount=0;
 let _noiseProfile=null; // Float32Array of noise magnitude per FFT bin
 
@@ -2810,42 +2813,110 @@ function applyReverb(srcBuffer, reverbTime, mix){
   return dst;
 }
 
-// ── NR and Reverb sliders — mobile-safe with debounce ──────────
-// iOS/Android don't reliably fire 'change' on range inputs.
-// We use 'input' for live label updates and a short debounce for rebuild.
-let _sliderDebounce=null;
-function _sliderRebuild(){
-  clearTimeout(_sliderDebounce);
-  _sliderDebounce=setTimeout(()=>{
-    if(originalBuffer) rebuildCorrectedBuffer();
-    drawEditor();
-  }, 300);
+// ── Custom sliders — work on all mobile browsers ──────────────
+// Native range inputs fail on iOS inside position:fixed containers.
+// Custom implementation with pointer/touch events.
+function makeCustomSlider(trackId, thumbId, valId, hiddenId, onValueChange){
+  const track = document.getElementById(trackId);
+  const thumb = document.getElementById(thumbId);
+  const valEl = document.getElementById(valId);
+  const hidden= document.getElementById(hiddenId);
+  let value = 0; // 0–100
+
+  function setVal(v, rebuild){
+    value = Math.max(0, Math.min(100, Math.round(v)));
+    thumb.style.left = value + '%';
+    valEl.textContent = value + '%';
+    if(hidden) hidden.value = value;
+    if(rebuild) onValueChange(value/100);
+  }
+
+  function posToVal(clientX){
+    const rect = track.getBoundingClientRect();
+    const pct  = (clientX - rect.left) / rect.width * 100;
+    return pct;
+  }
+
+  let dragging = false;
+
+  // Mouse
+  track.addEventListener('mousedown', e=>{
+    dragging=true;
+    setVal(posToVal(e.clientX), false);
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', e=>{
+    if(!dragging) return;
+    setVal(posToVal(e.clientX), false);
+    clearTimeout(track._deb);
+    track._deb=setTimeout(()=>onValueChange(value/100),300);
+  });
+  window.addEventListener('mouseup', e=>{
+    if(!dragging) return;
+    dragging=false;
+    setVal(posToVal(e.clientX), true);
+  });
+
+  // Touch — works on iOS/Android
+  track.addEventListener('touchstart', e=>{
+    dragging=true;
+    setVal(posToVal(e.touches[0].clientX), false);
+    e.preventDefault();
+    e.stopPropagation();
+  },{passive:false});
+  track.addEventListener('touchmove', e=>{
+    if(!dragging) return;
+    setVal(posToVal(e.touches[0].clientX), false);
+    clearTimeout(track._deb);
+    track._deb=setTimeout(()=>onValueChange(value/100),300);
+    e.preventDefault();
+    e.stopPropagation();
+  },{passive:false});
+  track.addEventListener('touchend', e=>{
+    if(!dragging) return;
+    dragging=false;
+    onValueChange(value/100);
+    e.preventDefault();
+  },{passive:false});
+
+  return {setVal};
 }
 
-nrSlider.addEventListener('input',()=>{
-  _nrAmount=parseInt(nrSlider.value)/100;
-  nrVal.textContent=nrSlider.value+'%';
-  if(_nrAmount>0&&!_noiseProfile&&originalBuffer){
-    _noiseProfile=buildNoiseProfile(originalBuffer.getChannelData(0),originalBuffer.sampleRate);
+const nrSlider = {value:0}; // compatibility shim
+const nrVal    = document.getElementById('nr-val');
+const _nrSliderCtrl = makeCustomSlider(
+  'nr-slider-track','nr-slider-thumb','nr-val','nr-slider',
+  (v)=>{
+    _nrAmount=v;
+    nrSlider.value=Math.round(v*100);
+    if(_nrAmount>0&&!_noiseProfile&&originalBuffer){
+      _noiseProfile=buildNoiseProfile(originalBuffer.getChannelData(0),originalBuffer.sampleRate);
+    }
+    if(originalBuffer){rebuildCorrectedBuffer();drawEditor();}
   }
-  _sliderRebuild();
-});
+);
 
-const reverbTimeSlider=document.getElementById('reverb-time-slider');
+const reverbTimeSlider={value:0};
+const reverbMixSlider={value:0};
 const reverbTimeVal=document.getElementById('reverb-time-val');
-const reverbMixSlider=document.getElementById('reverb-mix-slider');
-const reverbMixVal=document.getElementById('reverb-mix-val');
+const reverbMixVal =document.getElementById('reverb-mix-val');
 
-reverbTimeSlider.addEventListener('input',()=>{
-  _reverbTime=parseInt(reverbTimeSlider.value)/100;
-  reverbTimeVal.textContent=reverbTimeSlider.value+'%';
-  _sliderRebuild();
-});
-reverbMixSlider.addEventListener('input',()=>{
-  _reverbMix=parseInt(reverbMixSlider.value)/100;
-  reverbMixVal.textContent=reverbMixSlider.value+'%';
-  _sliderRebuild();
-});
+makeCustomSlider(
+  'reverb-time-slider-track','reverb-time-slider-thumb','reverb-time-val','reverb-time-slider',
+  (v)=>{
+    _reverbTime=v;
+    reverbTimeSlider.value=Math.round(v*100);
+    if(originalBuffer){rebuildCorrectedBuffer();drawEditor();}
+  }
+);
+makeCustomSlider(
+  'reverb-mix-slider-track','reverb-mix-slider-thumb','reverb-mix-val','reverb-mix-slider',
+  (v)=>{
+    _reverbMix=v;
+    reverbMixSlider.value=Math.round(v*100);
+    if(originalBuffer){rebuildCorrectedBuffer();drawEditor();}
+  }
+);
 // ══ PSOLA PITCH SHIFTER ════════════════════════════════════════
 // Two independent counters: inMark (T0) and outMark (T_out = T0/ratio).
 // OLA normalization: divide by sum(w) not sum(w^2) — eliminates amplitude spikes.
@@ -3291,8 +3362,11 @@ document.getElementById('back-btn').onclick=()=>{
   if(document.getElementById('nr-slider')) document.getElementById('nr-slider').value=0;
   if(document.getElementById('nr-val')) document.getElementById('nr-val').textContent='0%';
   _reverbTime=0;_reverbMix=0;
-  if(document.getElementById('reverb-time-slider')){document.getElementById('reverb-time-slider').value=0;document.getElementById('reverb-time-val').textContent='0%';}
-  if(document.getElementById('reverb-mix-slider')){document.getElementById('reverb-mix-slider').value=0;document.getElementById('reverb-mix-val').textContent='0%';}
+  if(_nrSliderCtrl) _nrSliderCtrl.setVal(0,false);
+  if(document.getElementById('reverb-time-slider-thumb')) document.getElementById('reverb-time-slider-thumb').style.left='0%';
+  if(document.getElementById('reverb-mix-slider-thumb'))  document.getElementById('reverb-mix-slider-thumb').style.left='0%';
+  if(document.getElementById('reverb-time-val')) document.getElementById('reverb-time-val').textContent='0%';
+  if(document.getElementById('reverb-mix-val'))  document.getElementById('reverb-mix-val').textContent='0%';
   allChunks=[];chunkCount=0;
   videoSourceFile=null;videoSourceName='';
   recTimer.textContent='';
