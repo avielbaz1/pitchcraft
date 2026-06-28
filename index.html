@@ -229,7 +229,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
     </button>
     <button class="t-btn" id="reset-all-btn" data-tip="Reset All">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5\"/></svg>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
     </button>
     <button class="t-btn" id="return-btn" data-tip="Return to playhead">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="11,17 6,12 11,7"/><polyline points="18,17 13,12 18,7"/></svg>
@@ -272,8 +272,6 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
         <span class="np-multi-count" id="np-multi-count">0 notes</span>
         <button class="np-multi-btn accent" id="np-multi-merge" style="margin-left:.35rem">merge</button>
         <button class="np-multi-btn" id="np-multi-snap" style="margin-left:.35rem;border-color:rgba(177,240,0,.5);color:var(--neon-lime)">snap</button>
-        <button class="np-multi-btn" id="np-multi-8va-up" style="margin-left:.35rem;border-color:rgba(0,243,255,.4);color:var(--neon-cyan)">+8va</button>
-        <button class="np-multi-btn" id="np-multi-8va-dn" style="margin-left:.35rem;border-color:rgba(0,243,255,.4);color:var(--neon-cyan)">-8va</button>
         <button class="np-multi-btn" id="np-multi-delete" style="margin-left:.35rem;border-color:var(--red);color:var(--red)">delete</button>
         <button class="np-close" id="np-multi-close" style="margin-left:auto">✕</button>
       </div>
@@ -299,8 +297,6 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
         <span class="np-cents" id="np-cents">+0¢</span>
         <button class="np-snap-btn" id="np-split" title="Split note in half">split</button>
         <button class="np-snap-btn" id="np-snap-single" title="Snap to nearest semitone" style="border-color:rgba(177,240,0,.5);color:var(--neon-lime)">snap</button>
-        <button class="np-snap-btn" id="np-8va-up" title="Shift up one octave" style="border-color:rgba(0,243,255,.4);color:var(--neon-cyan)">+8va</button>
-        <button class="np-snap-btn" id="np-8va-dn" title="Shift down one octave" style="border-color:rgba(0,243,255,.4);color:var(--neon-cyan)">-8va</button>
         <button class="np-snap-btn" id="np-delete" title="Delete note" style="border-color:var(--red);color:var(--red)">delete</button>
         <button class="np-close" id="np-close">✕</button>
       </div>
@@ -425,7 +421,7 @@ function detectPitch(buf, sr) {
   if (bestTau < 0) {
     for (let tau = minP; tau <= maxP; tau++)
       if (cmnd[tau] < bestVal) { bestVal = cmnd[tau]; bestTau = tau; }
-    if (bestVal > 0.45) return { freq: -1, rms };
+    if (bestVal > 0.30) return { freq: -1, rms };
   }
 
   // Parabolic refinement
@@ -437,28 +433,20 @@ function detectPitch(buf, sr) {
 
   let detFreq = sr / bestTau;
 
-  // UP-only octave correction — only for low frequencies (< 350Hz)
-  // where sub-harmonic detection is most common.
-  // Checks if doubling the frequency has strong autocorrelation.
-  // Safe because: for true fundamentals, R(T0/2) tends to be low or negative.
-  // Only triggers when a genuine higher-freq fundamental exists.
+  // UP-only octave correction for low frequencies (< 350Hz):
+  // Uses CMND ratio — much simpler and safer than autocorrelation.
+  // If the half-period (octave up) has CMND that is 40% better (ratio < 0.60),
+  // it's very likely the true fundamental — use it.
+  // Real C3 voices: C4 lag has similar CMND → no false trigger.
+  // Sub-harmonic error: C4 lag has much better CMND → triggers correctly.
   if (detFreq > 55 && detFreq < 350) {
     const halfTau = Math.round(bestTau / 2);
-    if (halfTau >= minP) {
-      // Compute normalized autocorrelation at both lags
-      const lim = Math.floor(n * 0.75); // use 75% of buffer for speed
-      let acfBest=0, acfHalf=0, e1=0, e2=0, e3=0, e4=0;
-      for (let i=0; i<lim-bestTau; i++) {
-        acfBest += buf[i]*buf[i+Math.round(bestTau)];
-        e1 += buf[i]*buf[i]; e2 += buf[i+Math.round(bestTau)]*buf[i+Math.round(bestTau)];
+    if (halfTau >= minP && sr / halfTau <= 1100) {
+      const halfVal = cmnd[Math.min(halfTau, maxP)];
+      const bestVal = cmnd[Math.min(Math.round(bestTau), maxP)];
+      if (halfVal < bestVal * 0.60) {
+        detFreq *= 2;
       }
-      for (let i=0; i<lim-halfTau; i++) {
-        acfHalf += buf[i]*buf[i+halfTau];
-        e3 += buf[i]*buf[i]; e4 += buf[i+halfTau]*buf[i+halfTau];
-      }
-      const rBest = acfBest / Math.sqrt(Math.max(e1*e2, 1e-10));
-      const rHalf = acfHalf / Math.sqrt(Math.max(e3*e4, 1e-10));
-      if (rHalf > rBest * 0.82) detFreq *= 2;
     }
   }
 
@@ -973,8 +961,9 @@ async function analyzeBuffer(buf, onProgress) {
         const d = notes[n].midi - med;
         const dAbs = Math.abs(d);
 
-        // Check all octave shifts: -24,-12,+12,+24 semitones
-        const shifts = [-12,12,-24,24];
+        // Only correct if the note is BELOW the median (octave too low error).
+        // Never correct a note that is ABOVE the median — it may be a legitimate high note.
+        const shifts = [-12,-24]; // down-correction only: bring low notes up
         let bestShift = 0, bestDist = dAbs;
         for (const s of shifts) {
           const dist = Math.abs(d - s);
@@ -989,38 +978,6 @@ async function analyzeBuffer(buf, onProgress) {
       }
     }
 
-    // Pass 5b — local neighbor check:
-    // If ANY immediate neighbor differs by ~12 semitones,
-    // it's very likely an octave error — verify and fix.
-    for (let n = 0; n < notes.length; n++) {
-      const prev = n > 0 ? notes[n-1].midi : null;
-      const next = n < notes.length-1 ? notes[n+1].midi : null;
-      const cur  = notes[n].midi;
-
-      // Collect evidence from neighbors
-      let upVotes = 0, downVotes = 0;
-      if (prev !== null) {
-        const d = cur - prev;
-        if (Math.abs(d + 12) < 2.5) upVotes++;    // cur is ~12 below prev
-        if (Math.abs(d - 12) < 2.5) downVotes++;  // cur is ~12 above prev
-      }
-      if (next !== null) {
-        const d = cur - next;
-        if (Math.abs(d + 12) < 2.5) upVotes++;    // cur is ~12 below next
-        if (Math.abs(d - 12) < 2.5) downVotes++;  // cur is ~12 above next
-      }
-
-      // Fix if at least ONE neighbor votes for correction
-      if (upVotes > 0 && downVotes === 0) {
-        notes[n].midi += 12; notes[n].midiOrig = notes[n].midi;
-        notes[n].freq = midi2f(notes[n].midi);
-        notes[n].cents = Math.round((notes[n].midi-snapMidi(notes[n].midi))*100);
-      } else if (downVotes > 0 && upVotes === 0) {
-        notes[n].midi -= 12; notes[n].midiOrig = notes[n].midi;
-        notes[n].freq = midi2f(notes[n].midi);
-        notes[n].cents = Math.round((notes[n].midi-snapMidi(notes[n].midi))*100);
-      }
-    }
   }
   // Clip each note's visual end to the next note's start (prevents overlap on display)
   for (let n = 0; n < notes.length; n++) {
@@ -2578,28 +2535,7 @@ document.getElementById('np-snap-single').onclick=()=>{
   rebuildCorrectedBuffer();refreshNoteList();drawEditor();playNote(selectedNote);
 };
 
-function shiftOctave(semitones){
-  const targets=selectedNote?[selectedNote]:notes.filter(n=>n.selected);
-  if(!targets.length)return;
-  pushUndo();
-  targets.forEach(n=>{
-    // Label-only shift: move midiOrig, keep tuneOffset unchanged.
-    // Audio is already correct — only the detected octave was wrong.
-    n.midiOrig += semitones;
-    n.midi      = n.midiOrig + n.tuneOffset;
-    n.freq      = midi2f(n.midi);
-    n.cents     = Math.round((n.midi-snapMidi(n.midi))*100);
-    updateNoteCents(n);
-  });
-  if(selectedNote) updateNotePanel(selectedNote);
-  updateMidiRange();
-  refreshNoteList();
-  drawEditor();
-}
-document.getElementById('np-8va-up').onclick=()=>shiftOctave(12);
-document.getElementById('np-8va-dn').onclick=()=>shiftOctave(-12);
-document.getElementById('np-multi-8va-up').onclick=()=>shiftOctave(12);
-document.getElementById('np-multi-8va-dn').onclick=()=>shiftOctave(-12);
+
 document.getElementById('np-delete').onclick=()=>{
   if(!selectedNote)return;
   pushUndo();
