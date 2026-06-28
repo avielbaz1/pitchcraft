@@ -382,13 +382,15 @@ function cents(midi){return Math.round((midi-snapMidi(midi))*100);}
 // ══ PITCH DETECTION — YIN (CMND) ════════════════════════════
 function detectPitch(buf, sr) {
   const n = buf.length;
-  let rms = 0; for (let i = 0; i < n; i++) rms += buf[i]*buf[i]; rms = Math.sqrt(rms/n);
-  if (rms < 0.005) return { freq: -1, rms };
+  let rms = 0;
+  for (let i = 0; i < n; i++) rms += buf[i]*buf[i];
+  rms = Math.sqrt(rms/n);
+  if (rms < 0.008) return { freq: -1, rms };
 
-  const minP = Math.floor(sr / 1100); // max ~1100Hz — covers soprano
-  const maxP = Math.min(Math.ceil(sr / 60), Math.floor(n / 2)); // min 60Hz
+  const minP = Math.floor(sr / 1100);
+  const maxP = Math.min(Math.ceil(sr / 60), Math.floor(n / 2));
 
-  // 1. Difference function (CMND/YIN)
+  // YIN difference function
   const diff = new Float32Array(maxP + 1);
   const sos  = new Float32Array(n + 1);
   for (let i = 0; i < n; i++) sos[i+1] = sos[i] + buf[i]*buf[i];
@@ -397,16 +399,18 @@ function detectPitch(buf, sr) {
     for (let i = 0; i < n - tau; i++) acf += buf[i] * buf[i+tau];
     diff[tau] = sos[n-tau] + (sos[n]-sos[tau]) - 2*acf;
   }
-  const cmnd = new Float32Array(maxP + 1); cmnd[0] = 1;
+
+  // Cumulative Mean Normalized Difference
+  const cmnd = new Float32Array(maxP + 1);
+  cmnd[0] = 1;
   let run = 0;
   for (let tau = 1; tau <= maxP; tau++) {
     run += diff[tau];
     cmnd[tau] = run === 0 ? 1 : diff[tau] / ((1/tau) * run);
   }
 
-  // 2. Find FIRST dip below threshold — smallest tau = highest plausible freq
-  // This is the classic YIN approach: scan from small tau upward
-  const THR = 0.18;
+  // Find best tau: first dip below threshold
+  const THR = 0.20;
   let bestTau = -1, bestVal = 1;
   for (let tau = minP + 1; tau < maxP - 1; tau++) {
     if (cmnd[tau] < cmnd[tau-1] && cmnd[tau] <= cmnd[tau+1]) {
@@ -415,81 +419,22 @@ function detectPitch(buf, sr) {
     }
   }
   if (bestTau < 0) {
-    // fallback: global minimum
     for (let tau = minP; tau <= maxP; tau++)
       if (cmnd[tau] < bestVal) { bestVal = cmnd[tau]; bestTau = tau; }
-    if (bestVal > 0.50) return { freq: -1, rms };
+    if (bestVal > 0.45) return { freq: -1, rms };
   }
 
-  // 3. Parabolic refinement
+  // Parabolic refinement
   if (bestTau > minP && bestTau < maxP) {
     const v1=cmnd[bestTau-1], v2=cmnd[bestTau], v3=cmnd[bestTau+1];
     const den = v1 - 2*v2 + v3;
     if (Math.abs(den) > 1e-6) bestTau += 0.5*(v1-v3)/den;
   }
 
-  // 4. Octave correction — check both directions:
-  //    a) Too HIGH: bestTau small → check tau*2 (one octave lower)
-  //    b) Too LOW:  bestTau large → check tau/2 (one octave higher)
-  let finalTau = bestTau;
-
-  // (a) Octave-too-high: tau*2 is stronger → prefer lower frequency
-  const subTau = Math.round(bestTau * 2);
-  if (subTau >= minP && subTau <= maxP) {
-    const subVal = cmnd[Math.min(Math.round(subTau), maxP)];
-    const subFreq = sr / subTau;
-    const tauRatio = subTau / bestTau;
-    const isOctave = Math.abs(tauRatio - 2.0) < 0.08;
-    if (subFreq >= 60 && subVal < bestVal * 0.5 && subVal < 0.12 && isOctave) {
-      let t2 = subTau;
-      if (t2 > 1 && t2 < maxP) {
-        const v1=cmnd[t2-1], v2=cmnd[t2], v3=cmnd[t2+1];
-        const den = v1-2*v2+v3;
-        if (Math.abs(den)>1e-6) t2 += 0.5*(v1-v3)/den;
-      }
-      finalTau = t2;
-    }
-  }
-
-  // (b) Octave-too-low: tau/2 has a reasonable dip → prefer higher frequency
-  // This fires when the true fundamental (smaller tau) was missed by the threshold
-  // but is still a visible dip in the CMND function.
-  const upTau = Math.round(bestTau / 2);
-  if (finalTau === bestTau && upTau >= minP && upTau <= maxP) {
-    const upVal = cmnd[Math.min(Math.round(upTau), maxP)];
-    const upFreq = sr / upTau;
-    const upRatio = bestTau / upTau;
-    const isOctaveUp = Math.abs(upRatio - 2.0) < 0.08;
-    // Accept if: in vocal range, reasonable CMND, and loosely a local minimum
-    // Use relaxed isLocalDip (+0.08 tolerance) to handle noisy signals
-    if (upFreq <= 1100 && upVal < 0.32 && isOctaveUp) {
-      const isLocalDip = upTau > 1 && upTau < maxP-1 &&
-                         cmnd[upTau] <= cmnd[upTau-1] + 0.08 &&
-                         cmnd[upTau] <= cmnd[upTau+1] + 0.08;
-      if (isLocalDip) {
-        let t2 = upTau;
-        const v1=cmnd[Math.max(1,t2-1)], v2=cmnd[t2], v3=cmnd[Math.min(maxP,t2+1)];
-        const den = v1-2*v2+v3;
-        if (Math.abs(den)>1e-6) t2 += 0.5*(v1-v3)/den;
-        finalTau = Math.max(minP, Math.min(maxP, Math.round(t2)));
-      }
-    }
-  }
-
-  const freq = sr / finalTau;
-  // DEBUG: log first few detections to console
-  if (typeof window._pitchDebugCount === 'undefined') window._pitchDebugCount = 0;
-  if (window._pitchDebugCount < 30) {
-    window._pitchDebugCount++;
-    const detectedHz = sr/finalTau;
-    const bestHz = sr/bestTau;
-    if (detectedHz !== bestHz)
-      console.log(`[PITCH] bestTau=${Math.round(bestTau)}(${bestHz.toFixed(0)}Hz,cmnd=${bestVal.toFixed(3)}) → corrected to ${detectedHz.toFixed(0)}Hz`);
-    else
-      console.log(`[PITCH] tau=${Math.round(finalTau)} → ${detectedHz.toFixed(0)}Hz (cmnd=${bestVal.toFixed(3)})`);
-  }
+  const freq = sr / bestTau;
   return { freq: (freq >= 60 && freq <= 1100) ? freq : -1, rms };
 }
+
 
 // ══ SCREEN MANAGEMENT ════════════════════════════════════════
 function showScreen(id){
@@ -827,25 +772,23 @@ async function analyzeBuffer(buf, onProgress) {
     if (Math.abs(frames[i].midi - med) > 0.7) { frames[i].midi = med; frames[i].freq = midi2f(med); }
   }
 
-  // Pass 2b — per-frame pitch correction (two passes for propagation)
-  for (let pass2 = 0; pass2 < 3; pass2++) {
-    const RADIUS = 32;
+  // Pass 2b — per-frame octave correction (2 passes)
+  for (let pass2 = 0; pass2 < 2; pass2++) {
+    const RADIUS = 24;
     for (let i = RADIUS; i < frames.length - RADIUS; i++) {
       if (!frames[i].voiced) continue;
       const nb = [];
       for (let k = i - RADIUS; k <= i + RADIUS; k++)
         if (k !== i && frames[k].voiced) nb.push(frames[k].midi);
-      if (nb.length < 8) continue;
+      if (nb.length < 6) continue;
       nb.sort((a,b) => a-b);
       const med = nb[Math.floor(nb.length/2)];
       const diff = frames[i].midi - med;
-      // Check octave errors first (±12, ±24), then fifth (±7), fourth (±5)
-      // Only correct if the corrected value would be CLOSER to median
-      const traps = [12,-12,24,-24,16,-16,7,-7,5,-5,19,-19];
+      // Only fix octave errors — most common YIN mistake
+      const traps = [12,-12,24,-24];
       let fixed = false;
       for (const t of traps) {
-        if (Math.abs(diff-t) < 2.5) {
-          // Verify correction actually improves fit to neighbors
+        if (Math.abs(diff - t) < 2.0) {
           const corrected = frames[i].midi - t;
           if (Math.abs(corrected - med) < Math.abs(frames[i].midi - med)) {
             frames[i].midi = corrected;
@@ -854,7 +797,7 @@ async function analyzeBuffer(buf, onProgress) {
           }
         }
       }
-      if (!fixed && Math.abs(frames[i].midi - med) > 4.0) frames[i].voiced = false;
+      if (!fixed && Math.abs(frames[i].midi - med) > 5.0) frames[i].voiced = false;
     }
   }
 
@@ -970,12 +913,11 @@ async function analyzeBuffer(buf, onProgress) {
         const dAbs = Math.abs(d);
 
         // Check all octave shifts: -24,-12,+12,+24 semitones
-        // Include ±16 for cases where octave+fifth confusion shifts by 16 semitones
-        const shifts = [-24,-12,12,24,-16,16];
+        const shifts = [-12,12,-24,24];
         let bestShift = 0, bestDist = dAbs;
         for (const s of shifts) {
           const dist = Math.abs(d - s);
-          if (dist < bestDist && dist < 5.5) { bestDist = dist; bestShift = s; }
+          if (dist < bestDist && dist < 3.5) { bestDist = dist; bestShift = s; }
         }
         if (bestShift !== 0) {
           notes[n].midi      -= bestShift;
@@ -983,6 +925,39 @@ async function analyzeBuffer(buf, onProgress) {
           notes[n].freq       = midi2f(notes[n].midi);
           notes[n].cents      = Math.round((notes[n].midi-snapMidi(notes[n].midi))*100);
         }
+      }
+    }
+
+    // Pass 5b — local neighbor check:
+    // If ANY immediate neighbor differs by ~12 semitones,
+    // it's very likely an octave error — verify and fix.
+    for (let n = 0; n < notes.length; n++) {
+      const prev = n > 0 ? notes[n-1].midi : null;
+      const next = n < notes.length-1 ? notes[n+1].midi : null;
+      const cur  = notes[n].midi;
+
+      // Collect evidence from neighbors
+      let upVotes = 0, downVotes = 0;
+      if (prev !== null) {
+        const d = cur - prev;
+        if (Math.abs(d + 12) < 2.5) upVotes++;    // cur is ~12 below prev
+        if (Math.abs(d - 12) < 2.5) downVotes++;  // cur is ~12 above prev
+      }
+      if (next !== null) {
+        const d = cur - next;
+        if (Math.abs(d + 12) < 2.5) upVotes++;    // cur is ~12 below next
+        if (Math.abs(d - 12) < 2.5) downVotes++;  // cur is ~12 above next
+      }
+
+      // Fix if at least ONE neighbor votes for correction
+      if (upVotes > 0 && downVotes === 0) {
+        notes[n].midi += 12; notes[n].midiOrig = notes[n].midi;
+        notes[n].freq = midi2f(notes[n].midi);
+        notes[n].cents = Math.round((notes[n].midi-snapMidi(notes[n].midi))*100);
+      } else if (downVotes > 0 && upVotes === 0) {
+        notes[n].midi -= 12; notes[n].midiOrig = notes[n].midi;
+        notes[n].freq = midi2f(notes[n].midi);
+        notes[n].cents = Math.round((notes[n].midi-snapMidi(notes[n].midi))*100);
       }
     }
   }
