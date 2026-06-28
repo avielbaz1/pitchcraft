@@ -460,16 +460,15 @@ function detectPitch(buf, sr) {
     const upFreq = sr / upTau;
     const upRatio = bestTau / upTau;
     const isOctaveUp = Math.abs(upRatio - 2.0) < 0.08;
-    // Prefer octave up only if: it's a clear dip, in vocal range,
-    // and NOT dramatically worse than bestTau (allows up to 3x worse CMND)
-    if (upFreq <= 1100 && upVal < 0.30 && upVal < bestVal * 3.0 && isOctaveUp) {
-      // Extra check: upTau must be a local dip, not just a low point
+    // Accept if: in vocal range, reasonable CMND, and loosely a local minimum
+    // Use relaxed isLocalDip (+0.08 tolerance) to handle noisy signals
+    if (upFreq <= 1100 && upVal < 0.32 && isOctaveUp) {
       const isLocalDip = upTau > 1 && upTau < maxP-1 &&
-                         cmnd[upTau] < cmnd[upTau-1] + 0.05 &&
-                         cmnd[upTau] < cmnd[upTau+1] + 0.05;
+                         cmnd[upTau] <= cmnd[upTau-1] + 0.08 &&
+                         cmnd[upTau] <= cmnd[upTau+1] + 0.08;
       if (isLocalDip) {
         let t2 = upTau;
-        const v1=cmnd[t2-1]||1, v2=cmnd[t2], v3=cmnd[t2+1]||1;
+        const v1=cmnd[Math.max(1,t2-1)], v2=cmnd[t2], v3=cmnd[Math.min(maxP,t2+1)];
         const den = v1-2*v2+v3;
         if (Math.abs(den)>1e-6) t2 += 0.5*(v1-v3)/den;
         finalTau = Math.max(minP, Math.min(maxP, Math.round(t2)));
@@ -478,6 +477,17 @@ function detectPitch(buf, sr) {
   }
 
   const freq = sr / finalTau;
+  // DEBUG: log first few detections to console
+  if (typeof window._pitchDebugCount === 'undefined') window._pitchDebugCount = 0;
+  if (window._pitchDebugCount < 30) {
+    window._pitchDebugCount++;
+    const detectedHz = sr/finalTau;
+    const bestHz = sr/bestTau;
+    if (detectedHz !== bestHz)
+      console.log(`[PITCH] bestTau=${Math.round(bestTau)}(${bestHz.toFixed(0)}Hz,cmnd=${bestVal.toFixed(3)}) → corrected to ${detectedHz.toFixed(0)}Hz`);
+    else
+      console.log(`[PITCH] tau=${Math.round(finalTau)} → ${detectedHz.toFixed(0)}Hz (cmnd=${bestVal.toFixed(3)})`);
+  }
   return { freq: (freq >= 60 && freq <= 1100) ? freq : -1, rms };
 }
 
@@ -818,7 +828,7 @@ async function analyzeBuffer(buf, onProgress) {
   }
 
   // Pass 2b — per-frame pitch correction (two passes for propagation)
-  for (let pass2 = 0; pass2 < 2; pass2++) {
+  for (let pass2 = 0; pass2 < 3; pass2++) {
     const RADIUS = 32;
     for (let i = RADIUS; i < frames.length - RADIUS; i++) {
       if (!frames[i].voiced) continue;
