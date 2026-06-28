@@ -272,6 +272,8 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
         <span class="np-multi-count" id="np-multi-count">0 notes</span>
         <button class="np-multi-btn accent" id="np-multi-merge" style="margin-left:.35rem">merge</button>
         <button class="np-multi-btn" id="np-multi-snap" style="margin-left:.35rem;border-color:rgba(177,240,0,.5);color:var(--neon-lime)">snap</button>
+        <button class="np-multi-btn" id="np-multi-8va-up" style="margin-left:.35rem;border-color:rgba(0,243,255,.4);color:var(--neon-cyan)">+8va</button>
+        <button class="np-multi-btn" id="np-multi-8va-dn" style="margin-left:.35rem;border-color:rgba(0,243,255,.4);color:var(--neon-cyan)">-8va</button>
         <button class="np-multi-btn" id="np-multi-delete" style="margin-left:.35rem;border-color:var(--red);color:var(--red)">delete</button>
         <button class="np-close" id="np-multi-close" style="margin-left:auto">✕</button>
       </div>
@@ -297,6 +299,8 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
         <span class="np-cents" id="np-cents">+0¢</span>
         <button class="np-snap-btn" id="np-split" title="Split note in half">split</button>
         <button class="np-snap-btn" id="np-snap-single" title="Snap to nearest semitone" style="border-color:rgba(177,240,0,.5);color:var(--neon-lime)">snap</button>
+        <button class="np-snap-btn" id="np-8va-up" title="Shift up one octave" style="border-color:rgba(0,243,255,.4);color:var(--neon-cyan)">+8va</button>
+        <button class="np-snap-btn" id="np-8va-dn" title="Shift down one octave" style="border-color:rgba(0,243,255,.4);color:var(--neon-cyan)">-8va</button>
         <button class="np-snap-btn" id="np-delete" title="Delete note" style="border-color:var(--red);color:var(--red)">delete</button>
         <button class="np-close" id="np-close">✕</button>
       </div>
@@ -431,8 +435,34 @@ function detectPitch(buf, sr) {
     if (Math.abs(den) > 1e-6) bestTau += 0.5*(v1-v3)/den;
   }
 
-  const freq = sr / bestTau;
-  return { freq: (freq >= 60 && freq <= 1100) ? freq : -1, rms };
+  let detFreq = sr / bestTau;
+
+  // UP-only octave correction — only for low frequencies (< 350Hz)
+  // where sub-harmonic detection is most common.
+  // Checks if doubling the frequency has strong autocorrelation.
+  // Safe because: for true fundamentals, R(T0/2) tends to be low or negative.
+  // Only triggers when a genuine higher-freq fundamental exists.
+  if (detFreq > 55 && detFreq < 350) {
+    const halfTau = Math.round(bestTau / 2);
+    if (halfTau >= minP) {
+      // Compute normalized autocorrelation at both lags
+      const lim = Math.floor(n * 0.75); // use 75% of buffer for speed
+      let acfBest=0, acfHalf=0, e1=0, e2=0, e3=0, e4=0;
+      for (let i=0; i<lim-bestTau; i++) {
+        acfBest += buf[i]*buf[i+Math.round(bestTau)];
+        e1 += buf[i]*buf[i]; e2 += buf[i+Math.round(bestTau)]*buf[i+Math.round(bestTau)];
+      }
+      for (let i=0; i<lim-halfTau; i++) {
+        acfHalf += buf[i]*buf[i+halfTau];
+        e3 += buf[i]*buf[i]; e4 += buf[i+halfTau]*buf[i+halfTau];
+      }
+      const rBest = acfBest / Math.sqrt(Math.max(e1*e2, 1e-10));
+      const rHalf = acfHalf / Math.sqrt(Math.max(e3*e4, 1e-10));
+      if (rHalf > rBest * 0.82) detFreq *= 2;
+    }
+  }
+
+  return { freq: (detFreq >= 60 && detFreq <= 1100) ? detFreq : -1, rms };
 }
 
 
@@ -573,6 +603,7 @@ async function processAudio(){
 }
 
 async function loadAudioFromUrl(urlOrBuffer,name){
+  liveFreqs=[]; // reset for each new file
   // Create a temporary context just for decoding
   try{ if(audioCtx && audioCtx.state!=='closed') await audioCtx.close(); }catch(_){}
   audioCtx=new(window.AudioContext||window.webkitAudioContext)();
@@ -607,6 +638,19 @@ async function loadAudioFromUrl(urlOrBuffer,name){
   document.getElementById('proc-bar').style.width='0%';
   document.getElementById('proc-pct').textContent='0%';
   await new Promise(r=>setTimeout(r,50));
+  // Build liveFreqs from the buffer (for uploaded files, not just mic recordings)
+  // Sample every ~80ms to match recording behavior
+  if (!liveFreqs.length) {
+    const sr=originalBuffer.sampleRate;
+    const data=originalBuffer.getChannelData(0);
+    const hop=Math.round(sr*0.080);
+    const win=4096;
+    for(let i=0;i+win<data.length;i+=hop){
+      const sl=data.slice(i,i+win);
+      const{freq}=detectPitch(sl,sr);
+      if(freq>0) liveFreqs.push({t:i/sr,f:freq});
+    }
+  }
   await analyzeBuffer(originalBuffer,(p)=>{
     const pct=Math.round(p*100);
     document.getElementById('proc-bar').style.width=pct+'%';
@@ -784,7 +828,6 @@ async function analyzeBuffer(buf, onProgress) {
       nb.sort((a,b) => a-b);
       const med = nb[Math.floor(nb.length/2)];
       const diff = frames[i].midi - med;
-      // Only fix octave errors — most common YIN mistake
       const traps = [12,-12,24,-24];
       let fixed = false;
       for (const t of traps) {
@@ -885,13 +928,31 @@ async function analyzeBuffer(buf, onProgress) {
     const allM = [...notes].map(n=>n.midi).sort((a,b)=>a-b);
     const gMed = allM.length ? allM[Math.floor(allM.length/2)] : 60;
 
-    // Also use liveFreqs (recorded during capture) as a strong anchor if available
-    let liveMedianMidi = gMed;
+    // Build anchor from liveFreqs — but detect if we have bimodal distribution
+    // (half frames at C3, half at C4 due to octave errors) and prefer the higher mode
+    let anchor = gMed;
     if (typeof liveFreqs !== 'undefined' && liveFreqs.length > 4) {
-      const lm = liveFreqs.filter(f=>f>38&&f<1100).map(f=>f2midi(f)).sort((a,b)=>a-b);
-      if (lm.length) liveMedianMidi = lm[Math.floor(lm.length/2)];
+      const lf = liveFreqs
+        .map(x => typeof x === 'object' ? x.f : x)
+        .filter(f => f > 38 && f < 1100);
+      if (lf.length > 4) {
+        const lm = lf.map(f => f2midi(f)).sort((a,b) => a-b);
+        const rawMedian = lm[Math.floor(lm.length/2)];
+
+        // Check for bimodal: count frames in two octave ranges
+        // If many frames are near rawMedian AND near rawMedian+12,
+        // prefer the higher group (more likely the true fundamental)
+        const lo = lm.filter(m => Math.abs(m - rawMedian) < 6).length;
+        const hi = lm.filter(m => Math.abs(m - (rawMedian+12)) < 6).length;
+
+        if (hi > lo * 0.4) {
+          // Significant higher-octave cluster exists → use it as anchor
+          anchor = rawMedian + 12;
+        } else {
+          anchor = rawMedian;
+        }
+      }
     }
-    const anchor = (Math.abs(liveMedianMidi-gMed) < 6) ? (liveMedianMidi*0.4+gMed*0.6) : gMed;
 
     // 8 passes — enough to propagate corrections through a full song
     for (let pass = 0; pass < 8; pass++) {
@@ -2516,6 +2577,28 @@ document.getElementById('np-snap-single').onclick=()=>{
   updateNotePanel(selectedNote);
   rebuildCorrectedBuffer();refreshNoteList();drawEditor();playNote(selectedNote);
 };
+
+function shiftOctave(semitones){
+  const targets=selectedNote?[selectedNote]:notes.filter(n=>n.selected);
+  if(!targets.length)return;
+  pushUndo();
+  targets.forEach(n=>{
+    n.midi+=semitones; n.midiOrig+=semitones;
+    n.tuneOffset=n.midi-n.midiOrig+semitones; // recalc
+    // Simpler: just shift both midi and midiOrig
+    n.midiOrig=n.midi-n.tuneOffset;
+    n.freq=midi2f(n.midi);
+    n.cents=Math.round((n.midi-snapMidi(n.midi))*100);
+    updateNoteCents(n);
+  });
+  if(selectedNote)updateNotePanel(selectedNote);
+  rebuildCorrectedBuffer();refreshNoteList();drawEditor();
+  if(selectedNote)playNote(selectedNote);
+}
+document.getElementById('np-8va-up').onclick=()=>shiftOctave(12);
+document.getElementById('np-8va-dn').onclick=()=>shiftOctave(-12);
+document.getElementById('np-multi-8va-up').onclick=()=>shiftOctave(12);
+document.getElementById('np-multi-8va-dn').onclick=()=>shiftOctave(-12);
 document.getElementById('np-delete').onclick=()=>{
   if(!selectedNote)return;
   pushUndo();
@@ -3031,7 +3114,8 @@ function pitchShift(src, pitchRatio, outLen){
 
   // ── PSOLA synthesis ─────────────────────────────────────────
   const T_out  = Math.max(1, Math.round(T0/pitchRatio));
-  const halfWin= T0;
+  // Window size: use the LARGER of T0 and T_out to avoid artifacts at high ratios
+  const halfWin= Math.max(T0, T_out);
   const winLen = halfWin*2;
   const win    = new Float32Array(winLen);
   for(let i=0;i<winLen;i++) win[i]=0.5*(1-Math.cos(2*Math.PI*i/(winLen-1)));
@@ -3137,8 +3221,8 @@ function rebuildCorrectedBuffer(){
       const dst=correctedBuffer.getChannelData(ch);
       const seg=src.slice(start,end);
 
-      // PSOLA pitch shift
-      const shifted=pitchShift(seg, avgRatio, segLen);
+      // PSOLA pitch shift — works for all shift sizes
+      const shifted = pitchShift(seg, avgRatio, segLen);
 
       // Find last PSOLA-covered sample
       let lastGood=segLen-1;
@@ -3151,17 +3235,15 @@ function rebuildCorrectedBuffer(){
       const writeStart = Math.max(0, safeOffset);
       const writeEnd   = lastGood;
 
-      // Ramp length = one pitch period (T0), capped at 1/4 of segment.
-      // Uses min(distFromStart, distFromEnd) so there's never a double-ramp conflict.
-      const T0approx = Math.max(16, Math.round(sr / 300)); // ~147Hz midpoint
-      const RAMP = Math.min(T0approx, Math.floor((writeEnd-writeStart)/4));
+      // Short ramp (32 samples ≈ 0.7ms) — just enough to prevent click,
+      // not long enough to color/muffle the sound
+      const RAMP = Math.min(32, Math.floor((writeEnd-writeStart)/8));
 
       for(let i=writeStart; i<=writeEnd; i++){
         const distStart = i - writeStart;
         const distEnd   = writeEnd - i;
-        // Single unified fade weight: 0 at edges, 1 in middle
         const fade = Math.min(distStart, distEnd, RAMP) / Math.max(1, RAMP);
-        const w    = 0.5*(1-Math.cos(Math.PI*fade)); // cosine — smooth
+        const w    = 0.5*(1-Math.cos(Math.PI*fade));
         dst[start+i] = src[start+i]*(1-w) + shifted[i]*w;
       }
 
