@@ -428,10 +428,12 @@ function detectPitch(buf, sr) {
     if (Math.abs(den) > 1e-6) bestTau += 0.5*(v1-v3)/den;
   }
 
-  // 4. Sub-harmonic check — fix octave-too-high only, not fifth/fourth errors.
-  // tau*2 = one octave below. Only correct if it's MUCH stronger (ratio < 0.5)
-  // AND tau ratio is close to exactly 2.0 (prevents fifth=1.5x, fourth=1.33x corrections).
+  // 4. Octave correction — check both directions:
+  //    a) Too HIGH: bestTau small → check tau*2 (one octave lower)
+  //    b) Too LOW:  bestTau large → check tau/2 (one octave higher)
   let finalTau = bestTau;
+
+  // (a) Octave-too-high: tau*2 is stronger → prefer lower frequency
   const subTau = Math.round(bestTau * 2);
   if (subTau >= minP && subTau <= maxP) {
     const subVal = cmnd[Math.min(Math.round(subTau), maxP)];
@@ -446,6 +448,32 @@ function detectPitch(buf, sr) {
         if (Math.abs(den)>1e-6) t2 += 0.5*(v1-v3)/den;
       }
       finalTau = t2;
+    }
+  }
+
+  // (b) Octave-too-low: tau/2 has a reasonable dip → prefer higher frequency
+  // This fires when the true fundamental (smaller tau) was missed by the threshold
+  // but is still a visible dip in the CMND function.
+  const upTau = Math.round(bestTau / 2);
+  if (finalTau === bestTau && upTau >= minP && upTau <= maxP) {
+    const upVal = cmnd[Math.min(Math.round(upTau), maxP)];
+    const upFreq = sr / upTau;
+    const upRatio = bestTau / upTau;
+    const isOctaveUp = Math.abs(upRatio - 2.0) < 0.08;
+    // Prefer octave up only if: it's a clear dip, in vocal range,
+    // and NOT dramatically worse than bestTau (allows up to 3x worse CMND)
+    if (upFreq <= 1100 && upVal < 0.30 && upVal < bestVal * 3.0 && isOctaveUp) {
+      // Extra check: upTau must be a local dip, not just a low point
+      const isLocalDip = upTau > 1 && upTau < maxP-1 &&
+                         cmnd[upTau] < cmnd[upTau-1] + 0.05 &&
+                         cmnd[upTau] < cmnd[upTau+1] + 0.05;
+      if (isLocalDip) {
+        let t2 = upTau;
+        const v1=cmnd[t2-1]||1, v2=cmnd[t2], v3=cmnd[t2+1]||1;
+        const den = v1-2*v2+v3;
+        if (Math.abs(den)>1e-6) t2 += 0.5*(v1-v3)/den;
+        finalTau = Math.max(minP, Math.min(maxP, Math.round(t2)));
+      }
     }
   }
 
@@ -803,10 +831,10 @@ async function analyzeBuffer(buf, onProgress) {
       const diff = frames[i].midi - med;
       // Check octave errors first (±12, ±24), then fifth (±7), fourth (±5)
       // Only correct if the corrected value would be CLOSER to median
-      const traps = [12,-12,24,-24,7,-7,5,-5,19,-19];
+      const traps = [12,-12,24,-24,16,-16,7,-7,5,-5,19,-19];
       let fixed = false;
       for (const t of traps) {
-        if (Math.abs(diff-t) < 1.6) {
+        if (Math.abs(diff-t) < 2.5) {
           // Verify correction actually improves fit to neighbors
           const corrected = frames[i].midi - t;
           if (Math.abs(corrected - med) < Math.abs(frames[i].midi - med)) {
@@ -932,11 +960,12 @@ async function analyzeBuffer(buf, onProgress) {
         const dAbs = Math.abs(d);
 
         // Check all octave shifts: -24,-12,+12,+24 semitones
-        const shifts = [-24,-12,12,24];
+        // Include ±16 for cases where octave+fifth confusion shifts by 16 semitones
+        const shifts = [-24,-12,12,24,-16,16];
         let bestShift = 0, bestDist = dAbs;
         for (const s of shifts) {
           const dist = Math.abs(d - s);
-          if (dist < bestDist && dist < 4.5) { bestDist = dist; bestShift = s; }
+          if (dist < bestDist && dist < 5.5) { bestDist = dist; bestShift = s; }
         }
         if (bestShift !== 0) {
           notes[n].midi      -= bestShift;
@@ -2568,8 +2597,10 @@ function drawPiano(){
 
     // Note label — only if row is tall enough
     if(ROW_H>=14){
-      const label=isC?note+octave:note;
-      pc.font=`${isC?700:500} ${Math.min(10,ROW_H*0.55)}px var(--mono, monospace)`;
+      // Show octave on C (standard) and also on B (just above C — helps orient)
+      const showOctave = isC || note==='B' || note==='G' || note==='E';
+      const label = showOctave ? note+octave : note;
+      pc.font=`${isC||note==='B'?700:500} ${Math.min(10,ROW_H*0.55)}px var(--mono, monospace)`;
       pc.textAlign='center';
       pc.textBaseline='middle';
       // Glowing colors per note group
