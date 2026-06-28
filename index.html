@@ -2583,17 +2583,18 @@ function shiftOctave(semitones){
   if(!targets.length)return;
   pushUndo();
   targets.forEach(n=>{
-    n.midi+=semitones; n.midiOrig+=semitones;
-    n.tuneOffset=n.midi-n.midiOrig+semitones; // recalc
-    // Simpler: just shift both midi and midiOrig
-    n.midiOrig=n.midi-n.tuneOffset;
-    n.freq=midi2f(n.midi);
-    n.cents=Math.round((n.midi-snapMidi(n.midi))*100);
+    // Label-only shift: move midiOrig, keep tuneOffset unchanged.
+    // Audio is already correct — only the detected octave was wrong.
+    n.midiOrig += semitones;
+    n.midi      = n.midiOrig + n.tuneOffset;
+    n.freq      = midi2f(n.midi);
+    n.cents     = Math.round((n.midi-snapMidi(n.midi))*100);
     updateNoteCents(n);
   });
-  if(selectedNote)updateNotePanel(selectedNote);
-  rebuildCorrectedBuffer();refreshNoteList();drawEditor();
-  if(selectedNote)playNote(selectedNote);
+  if(selectedNote) updateNotePanel(selectedNote);
+  updateMidiRange();
+  refreshNoteList();
+  drawEditor();
 }
 document.getElementById('np-8va-up').onclick=()=>shiftOctave(12);
 document.getElementById('np-8va-dn').onclick=()=>shiftOctave(-12);
@@ -3114,8 +3115,7 @@ function pitchShift(src, pitchRatio, outLen){
 
   // ── PSOLA synthesis ─────────────────────────────────────────
   const T_out  = Math.max(1, Math.round(T0/pitchRatio));
-  // Window size: use the LARGER of T0 and T_out to avoid artifacts at high ratios
-  const halfWin= Math.max(T0, T_out);
+  const halfWin= T0;
   const winLen = halfWin*2;
   const win    = new Float32Array(winLen);
   for(let i=0;i<winLen;i++) win[i]=0.5*(1-Math.cos(2*Math.PI*i/(winLen-1)));
