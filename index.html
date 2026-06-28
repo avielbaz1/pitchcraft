@@ -428,18 +428,17 @@ function detectPitch(buf, sr) {
     if (Math.abs(den) > 1e-6) bestTau += 0.5*(v1-v3)/den;
   }
 
-  // 4. Sub-harmonic check — correct octave-too-high errors.
-  // If tau*2 (= one octave lower) has a MUCH stronger dip than tau,
-  // we likely detected the 2nd harmonic instead of the fundamental.
-  // Condition: subVal < bestVal*0.5 AND subVal < 0.10 (very strict)
-  // This avoids the "go too low" trap.
+  // 4. Sub-harmonic check — fix octave-too-high only, not fifth/fourth errors.
+  // tau*2 = one octave below. Only correct if it's MUCH stronger (ratio < 0.5)
+  // AND tau ratio is close to exactly 2.0 (prevents fifth=1.5x, fourth=1.33x corrections).
   let finalTau = bestTau;
   const subTau = Math.round(bestTau * 2);
-  if (subTau <= maxP) {
+  if (subTau >= minP && subTau <= maxP) {
     const subVal = cmnd[Math.min(Math.round(subTau), maxP)];
     const subFreq = sr / subTau;
-    if (subFreq >= 60 && subVal < bestVal * 0.6 && subVal < 0.15) {
-      // Sub-harmonic is significantly stronger — use it (true fundamental)
+    const tauRatio = subTau / bestTau;
+    const isOctave = Math.abs(tauRatio - 2.0) < 0.08;
+    if (subFreq >= 60 && subVal < bestVal * 0.5 && subVal < 0.12 && isOctave) {
       let t2 = subTau;
       if (t2 > 1 && t2 < maxP) {
         const v1=cmnd[t2-1], v2=cmnd[t2], v3=cmnd[t2+1];
@@ -790,9 +789,9 @@ async function analyzeBuffer(buf, onProgress) {
     if (Math.abs(frames[i].midi - med) > 0.7) { frames[i].midi = med; frames[i].freq = midi2f(med); }
   }
 
-  // Pass 2b — per-frame octave correction (two passes for propagation)
+  // Pass 2b — per-frame pitch correction (two passes for propagation)
   for (let pass2 = 0; pass2 < 2; pass2++) {
-    const RADIUS = 32; // wider window catches more context
+    const RADIUS = 32;
     for (let i = RADIUS; i < frames.length - RADIUS; i++) {
       if (!frames[i].voiced) continue;
       const nb = [];
@@ -802,17 +801,21 @@ async function analyzeBuffer(buf, onProgress) {
       nb.sort((a,b) => a-b);
       const med = nb[Math.floor(nb.length/2)];
       const diff = frames[i].midi - med;
-      // Check octave errors first (most common), then fifth/fourth
+      // Check octave errors first (±12, ±24), then fifth (±7), fourth (±5)
+      // Only correct if the corrected value would be CLOSER to median
       const traps = [12,-12,24,-24,7,-7,5,-5,19,-19];
       let fixed = false;
       for (const t of traps) {
-        if (Math.abs(diff-t) < 1.8) {
-          frames[i].midi -= t;
-          frames[i].freq = midi2f(frames[i].midi);
-          fixed = true; break;
+        if (Math.abs(diff-t) < 1.6) {
+          // Verify correction actually improves fit to neighbors
+          const corrected = frames[i].midi - t;
+          if (Math.abs(corrected - med) < Math.abs(frames[i].midi - med)) {
+            frames[i].midi = corrected;
+            frames[i].freq = midi2f(corrected);
+            fixed = true; break;
+          }
         }
       }
-      // Unvoice outliers that don't fit even after correction
       if (!fixed && Math.abs(frames[i].midi - med) > 4.0) frames[i].voiced = false;
     }
   }
@@ -3132,25 +3135,18 @@ function rebuildCorrectedBuffer(){
       const writeStart = Math.max(0, safeOffset);
       const writeEnd   = lastGood;
 
-      // Simple approach: write shifted directly, no crossfade.
-      // PSOLA already produces a smooth signal — the crossfade itself
-      // was creating discontinuities at its boundaries.
-      // We pad with a short linear ramp only at the very first/last samples
-      // to avoid DC offset jumps.
-      const RAMP = Math.min(64, Math.floor(segLen/8)); // ~1.5ms
+      // Ramp length = one pitch period (T0), capped at 1/4 of segment.
+      // Uses min(distFromStart, distFromEnd) so there's never a double-ramp conflict.
+      const T0approx = Math.max(16, Math.round(sr / 300)); // ~147Hz midpoint
+      const RAMP = Math.min(T0approx, Math.floor((writeEnd-writeStart)/4));
+
       for(let i=writeStart; i<=writeEnd; i++){
-        let s = shifted[i];
-        // Tiny ramp at note start
-        if(i < writeStart+RAMP){
-          const t=(i-writeStart)/RAMP;
-          s = src[start+i]*(1-t) + s*t;
-        }
-        // Tiny ramp at note end
-        if(i > writeEnd-RAMP){
-          const t=(writeEnd-i)/RAMP;
-          s = src[start+i]*(1-t) + s*t;
-        }
-        dst[start+i] = s;
+        const distStart = i - writeStart;
+        const distEnd   = writeEnd - i;
+        // Single unified fade weight: 0 at edges, 1 in middle
+        const fade = Math.min(distStart, distEnd, RAMP) / Math.max(1, RAMP);
+        const w    = 0.5*(1-Math.cos(Math.PI*fade)); // cosine — smooth
+        dst[start+i] = src[start+i]*(1-w) + shifted[i]*w;
       }
 
       lastWritten[ch] = start + writeEnd;
