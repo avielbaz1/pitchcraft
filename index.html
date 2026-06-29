@@ -554,11 +554,46 @@ document.getElementById('video-in').onchange=async(e)=>{
   videoSourceName=file.name;
   showScreen('proc-screen');
   document.getElementById('proc-text').textContent='extracting audio from video...';
+
+  // Try primary method: decodeAudioData via ArrayBuffer
   try{
-    await loadAudioFromUrl(file,file.name);
+    const ab=await file.arrayBuffer();
+    // Create temp context just to decode
+    const tmpCtx=new(window.AudioContext||window.webkitAudioContext)();
+    let decoded;
+    try{
+      decoded=await tmpCtx.decodeAudioData(ab);
+    }catch(decodeErr){
+      // Fallback: try via <video> element + MediaElementSourceNode
+      // This works on iOS/Safari for MP4/MOV where ArrayBuffer decode fails
+      try{await tmpCtx.close();}catch(_){}
+      document.getElementById('proc-text').textContent='trying video element method...';
+      const url=URL.createObjectURL(file);
+      const video=document.createElement('video');
+      video.src=url;
+      video.muted=true;
+      await new Promise((res,rej)=>{
+        video.onloadedmetadata=res;
+        video.onerror=()=>rej(new Error('video failed to load: '+file.type));
+        setTimeout(()=>rej(new Error('timeout loading video')),10000);
+      });
+      // Render to offline context
+      const dur=video.duration;
+      if(!dur||dur>600) throw new Error('video too long or no audio track');
+      const offCtx=new OfflineAudioContext(2,Math.ceil(dur*44100),44100);
+      const src2=offCtx.createMediaElementSource(video);
+      src2.connect(offCtx.destination);
+      video.play();
+      decoded=await offCtx.startRendering();
+      URL.revokeObjectURL(url);
+    }
+    try{await tmpCtx.close();}catch(_){}
+    // Now load the decoded buffer
+    await loadAudioFromUrl(decoded, file.name);
+    return;
   }catch(err){
-    document.getElementById('proc-text').textContent='error: '+err.message;
-    console.error(err);
+    document.getElementById('proc-text').textContent='video error: '+err.message;
+    console.error('Video import failed:',err);
   }
 };
 
@@ -595,16 +630,22 @@ async function loadAudioFromUrl(urlOrBuffer,name){
   // Create a temporary context just for decoding
   try{ if(audioCtx && audioCtx.state!=='closed') await audioCtx.close(); }catch(_){}
   audioCtx=new(window.AudioContext||window.webkitAudioContext)();
-  let ab;
-  if(urlOrBuffer instanceof ArrayBuffer){
-    ab=urlOrBuffer;
-  } else if(urlOrBuffer instanceof Blob){
-    ab=await urlOrBuffer.arrayBuffer();
+
+  // Accept pre-decoded AudioBuffer directly (from video import)
+  if(urlOrBuffer instanceof AudioBuffer){
+    originalBuffer=urlOrBuffer;
   } else {
-    try{const resp=await fetch(urlOrBuffer);ab=await resp.arrayBuffer();}
-    catch(e){throw new Error('Failed to load audio (try serving over http, not file://).');}
+    let ab;
+    if(urlOrBuffer instanceof ArrayBuffer){
+      ab=urlOrBuffer;
+    } else if(urlOrBuffer instanceof Blob){
+      ab=await urlOrBuffer.arrayBuffer();
+    } else {
+      try{const resp=await fetch(urlOrBuffer);ab=await resp.arrayBuffer();}
+      catch(e){throw new Error('Failed to load audio (try serving over http, not file://).');}
+    }
+    originalBuffer=await audioCtx.decodeAudioData(ab);
   }
-  originalBuffer=await audioCtx.decodeAudioData(ab);
   // Recreate context at the buffer's exact sample rate.
   // This prevents the browser from resampling (e.g. 44100→48000) during playback,
   // which causes HF rolloff. We must close the decode context first.
@@ -3014,86 +3055,102 @@ makeCustomSlider(
 // Two independent counters: inMark (T0) and outMark (T_out = T0/ratio).
 // OLA normalization: divide by sum(w) not sum(w^2) — eliminates amplitude spikes.
 function pitchShift(src, pitchRatio, outLen){
-  if(Math.abs(pitchRatio-1)<0.0005){
+  if(Math.abs(pitchRatio-1)<0.015){
     const r=new Float32Array(outLen||src.length);
     r.set(src.subarray(0,r.length)); return r;
   }
 
   const N   = src.length;
-  const OUT = outLen||N;
+  const OUT = outLen || N;
 
-  // ── Find T0 via normalized autocorrelation ──────────────────
-  const midS  = Math.floor(N*0.25);
-  const WIN   = Math.min(4096, Math.floor(N*0.5));
-  const minLag= Math.max(16,  Math.round(44100/800)); // 800Hz max
-  const maxLag= Math.min(512, Math.round(44100/60),   Math.floor(WIN/2));
+  // WSOLA (Waveform Similarity OLA) pitch shift:
+  // 1. Time-stretch by pitchRatio using WSOLA (finds best-matching frames)
+  // 2. Hermite resample back to original length (changes pitch without artifacts)
+  // No phase accumulation → no metallic/phasey artifacts.
 
-  let bestLag=100, bestCorr=-2;
-  const seg=src.subarray(midS, midS+WIN);
-  let e0=0; for(let i=0;i<WIN;i++) e0+=seg[i]*seg[i];
-  e0=Math.max(e0,1e-10);
+  const WIN    = 2048;
+  const HOP    = WIN >> 2;   // 25% hop = 75% overlap
+  const SEARCH = WIN >> 2;   // search ±WIN/4 around nominal position
 
-  for(let lag=minLag; lag<=maxLag; lag++){
-    let c=0,e1=0;
-    for(let i=0;i<WIN-lag;i++){ c+=seg[i]*seg[i+lag]; e1+=seg[i+lag]*seg[i+lag]; }
-    const r=c/Math.sqrt(e0*Math.max(e1,1e-10));
-    if(r>bestCorr){ bestCorr=r; bestLag=lag; }
-  }
-  // Parabolic refinement
-  if(bestLag>minLag&&bestLag<maxLag){
-    const ym=psolaCorr(seg,WIN,e0,bestLag-1);
-    const yp=psolaCorr(seg,WIN,e0,bestLag+1);
-    const d=2*(2*bestCorr-ym-yp);
-    if(Math.abs(d)>1e-6)
-      bestLag=Math.max(minLag,Math.min(maxLag,Math.round(bestLag+(yp-ym)/d)));
-  }
-  const T0=bestLag;
+  const win = new Float32Array(WIN);
+  for(let i=0;i<WIN;i++) win[i]=0.5*(1-Math.cos(2*Math.PI*i/(WIN-1)));
 
-  // ── PSOLA synthesis ─────────────────────────────────────────
-  const T_out  = Math.max(1, Math.round(T0/pitchRatio));
-  const halfWin= T0;
-  const winLen = halfWin*2;
-  const win    = new Float32Array(winLen);
-  for(let i=0;i<winLen;i++) win[i]=0.5*(1-Math.cos(2*Math.PI*i/(winLen-1)));
+  const tsLen = Math.round(N * pitchRatio);
+  const tsOut = new Float32Array(tsLen + WIN + SEARCH);
+  const tsWgt = new Float32Array(tsLen + WIN + SEARCH);
 
-  const out=new Float32Array(OUT);
-  const wgt=new Float32Array(OUT);
+  let outPos = 0;
 
-  let inMark=0, outMark=0;
-  while(outMark<OUT){
-    for(let i=-halfWin; i<halfWin; i++){
-      const si=inMark+i, di=outMark+i;
-      if(si<0||si>=N||di<0||di>=OUT) continue;
-      const w=win[i+halfWin];
-      out[di]+=src[si]*w;
-      wgt[di]+=w;            // sum(w) — NOT sum(w^2)
+  while(outPos + WIN <= tsLen){
+    // Nominal input position for this output frame
+    const nomIn = Math.round(outPos / pitchRatio);
+
+    // Find best-matching input frame via cross-correlation with previous output
+    let bestCorr = -1e10, bestIn = nomIn;
+
+    if(outPos > 0){
+      const overlap = Math.min(HOP, outPos);
+      const oStart  = outPos - overlap;
+
+      for(let delta = -SEARCH; delta <= SEARCH; delta += 4){
+        const cand = nomIn + delta;
+        if(cand < 0 || cand + WIN > N) continue;
+
+        let corr=0, normC=0, normO=0;
+        for(let i=0; i<overlap; i++){
+          const o  = tsOut[oStart+i];
+          const ci = cand - overlap + i;
+          const c  = ci>=0 ? src[ci] : 0;
+          corr  += o*c;
+          normC += c*c;
+          normO += o*o;
+        }
+        const denom = Math.sqrt(normC*normO) + 1e-10;
+        if(corr/denom > bestCorr){ bestCorr=corr/denom; bestIn=cand; }
+      }
     }
-    inMark +=T0;
-    outMark+=T_out;
+
+    // Overlap-add best matching frame
+    for(let i=0; i<WIN; i++){
+      const di = outPos+i;
+      if(di < tsOut.length){
+        tsOut[di] += src[bestIn+i] * win[i];
+        tsWgt[di] += win[i] * win[i];
+      }
+    }
+
+    outPos += HOP;
   }
 
-  // Normalize — where coverage drops below 0.5 (end of buffer),
-  // fade linearly to 0 instead of dividing by tiny weight → no end click
-  const MIN_WGT=0.5;
-  let lastGoodVal=0, lastGoodIdx=0;
-  for(let i=0;i<OUT;i++){
-    if(wgt[i]>=MIN_WGT){
-      let v=out[i]/wgt[i];
-      if(v> 1) v= 1;
-      if(v<-1) v=-1;
-      out[i]=v;
-      lastGoodVal=v;
-      lastGoodIdx=i;
-    } else {
-      // Fade toward 0 over one pitch period — prevents click at end
-      const dist=i-lastGoodIdx;
-      const fade=Math.max(0, 1-dist/halfWin);
-      out[i]=lastGoodVal*fade;
-    }
+  // Normalize OLA
+  for(let i=0; i<tsLen; i++)
+    tsOut[i] = tsWgt[i] > 0.1 ? tsOut[i]/tsWgt[i] : 0;
+
+  // Hermite cubic resample back to original length (applies pitch shift)
+  const out = new Float32Array(OUT);
+  for(let i=0; i<OUT; i++){
+    const t  = i * tsLen / OUT;
+    const j  = Math.floor(t);
+    const f  = t - j;
+    const p0 = tsOut[Math.max(0,j-1)];
+    const p1 = tsOut[Math.min(tsLen-1,j)];
+    const p2 = tsOut[Math.min(tsLen-1,j+1)];
+    const p3 = tsOut[Math.min(tsLen-1,j+2)];
+    const c0=p1, c1=0.5*(p2-p0), c2=p0-2.5*p1+2*p2-0.5*p3, c3=0.5*(p3-p0)+1.5*(p1-p2);
+    out[i] = ((c3*f+c2)*f+c1)*f+c0;
   }
+
+  // Match RMS to preserve loudness
+  let srcRms=0, outRms=0;
+  const m0=Math.floor(OUT*0.25), m1=Math.floor(OUT*0.75);
+  for(let i=m0;i<m1;i++){ srcRms+=src[i]*src[i]; outRms+=out[i]*out[i]; }
+  if(outRms>1e-10){
+    const gain=Math.min(4,Math.max(0.25,Math.sqrt(srcRms/outRms)));
+    for(let i=0;i<OUT;i++) out[i]*=gain;
+  }
+
   return out;
 }
-
 function psolaCorr(seg,n,e0,lag){
   let c=0,e1=0;
   for(let i=0;i<n-lag;i++){c+=seg[i]*seg[i+lag];e1+=seg[i+lag]*seg[i+lag];}
@@ -3111,7 +3168,7 @@ function rebuildCorrectedBuffer(){
   const lastWritten = new Array(originalBuffer.numberOfChannels).fill(-1);
 
   notes.forEach(n=>{
-    const hasShift=Math.abs(n.tuneOffset)>0.005;
+    const hasShift=Math.abs(n.tuneOffset)>0.25; // only process corrections > 0.25 semitones (25 cents)
     const hasVibrato=(n.vibratoReduction||0)>0;
     if(!hasShift&&!hasVibrato)return;
     const start=Math.floor(n.startSample);
@@ -3152,13 +3209,17 @@ function rebuildCorrectedBuffer(){
       ? ratioArray.reduce((s,v)=>s+v,0)/ratioArray.length
       : constRatio;
 
+    // Compute PSOLA only from ch=0 — use same result for all channels
+    // This prevents inter-channel phase differences (doubling/comb effect)
+    const seg0 = originalBuffer.getChannelData(0).slice(start, end);
+    const shifted0 = pitchShift(seg0, avgRatio, segLen);
+
     for(let ch=0;ch<originalBuffer.numberOfChannels;ch++){
       const src=originalBuffer.getChannelData(ch);
       const dst=correctedBuffer.getChannelData(ch);
-      const seg=src.slice(start,end);
 
-      // PSOLA pitch shift — works for all shift sizes
-      const shifted = pitchShift(seg, avgRatio, segLen);
+      // Use ch=0's PSOLA result for all channels (same pitch shift, no phase drift)
+      const shifted = shifted0;
 
       // Find last PSOLA-covered sample
       let lastGood=segLen-1;
@@ -3171,9 +3232,9 @@ function rebuildCorrectedBuffer(){
       const writeStart = Math.max(0, safeOffset);
       const writeEnd   = lastGood;
 
-      // Short ramp (32 samples ≈ 0.7ms) — just enough to prevent click,
-      // not long enough to color/muffle the sound
-      const RAMP = Math.min(32, Math.floor((writeEnd-writeStart)/8));
+      // Ramp: 128 samples (~3ms) — covers one pitch period for most voice ranges
+      // Long enough to eliminate phase-mismatch clicks, short enough to be inaudible
+      const RAMP = Math.min(128, Math.floor((writeEnd-writeStart)/6));
 
       for(let i=writeStart; i<=writeEnd; i++){
         const distStart = i - writeStart;
