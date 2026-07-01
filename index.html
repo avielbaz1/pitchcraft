@@ -719,6 +719,8 @@ async function loadAudioFromUrl(urlOrBuffer,name){
   // Show correct export button
   // export buttons always visible
   showScreen('ed-screen');
+  // Pre-warm playback context after load
+  if(correctedBuffer) preloadPlayBuf(correctedBuffer);
   requestAnimationFrame(()=>{
     PX_PER_SEC=PX_PER_SEC_DEFAULT;
     updateMidiRange();
@@ -1542,6 +1544,7 @@ function doBypass(){
   }
 
   bypassMode=!bypassMode;
+  _playBuf=null; _playBufSrc=null; // reload correct buffer on next play
 
   document.getElementById('bypass-btn').classList.toggle('on',bypassMode);
 
@@ -1561,13 +1564,27 @@ bypassBtn.addEventListener('touchend',(e)=>{
 
 // Dedicated playback context — always fresh, never contaminated by decoding
 let _playCtx=null;
+let _playBuf=null;      // buffer pre-loaded into _playCtx — avoids per-play copy
+let _playBufSrc=null;   // which correctedBuffer/originalBuffer is loaded
 
 function getPlayCtx(sr){
-  // Reuse if same SR and running, otherwise create fresh
   if(_playCtx && _playCtx.state!=='closed' && _playCtx.sampleRate===sr) return _playCtx;
   try{if(_playCtx) _playCtx.close();}catch(_){}
   _playCtx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:sr});
+  // Warm up: resume immediately so first play has no delay
+  _playCtx.resume();
+  _playBuf=null; _playBufSrc=null;  // invalidate cached buffer
   return _playCtx;
+}
+
+// Pre-load a buffer into _playCtx so playAudio doesn't need to copy it
+function preloadPlayBuf(buf){
+  if(!buf) return;
+  const pCtx=getPlayCtx(buf.sampleRate);
+  if(_playBufSrc===buf && _playBuf) return; // already loaded
+  const pb=pCtx.createBuffer(buf.numberOfChannels,buf.length,buf.sampleRate);
+  for(let ch=0;ch<buf.numberOfChannels;ch++) pb.getChannelData(ch).set(buf.getChannelData(ch));
+  _playBuf=pb; _playBufSrc=buf;
 }
 
 function playAudio(){
@@ -1582,9 +1599,14 @@ function playAudio(){
   const pCtx = getPlayCtx(buf.sampleRate);
   if(pCtx.state==='suspended') pCtx.resume();
 
-  // Copy buffer into playback context
-  const pbuf=pCtx.createBuffer(buf.numberOfChannels,buf.length,buf.sampleRate);
-  for(let ch=0;ch<buf.numberOfChannels;ch++) pbuf.getChannelData(ch).set(buf.getChannelData(ch));
+  // Use pre-loaded buffer if available, otherwise load now
+  preloadPlayBuf(buf);
+  const pbuf = (_playBufSrc===buf && _playBuf) ? _playBuf :
+    (() => {
+      const b=pCtx.createBuffer(buf.numberOfChannels,buf.length,buf.sampleRate);
+      for(let ch=0;ch<buf.numberOfChannels;ch++) b.getChannelData(ch).set(buf.getChannelData(ch));
+      return b;
+    })();
 
   sourceNode=pCtx.createBufferSource();
   sourceNode.buffer=pbuf;
@@ -3416,6 +3438,8 @@ async function rebuildCorrectedBuffer(){
   } else {
     _postProcess();
   }
+  // Pre-load into playback context to eliminate first-play delay
+  preloadPlayBuf(correctedBuffer);
 }
 
 // ══ FILENAME DIALOG ══════════════════════════════════════════
