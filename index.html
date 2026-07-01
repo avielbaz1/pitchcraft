@@ -119,6 +119,23 @@ input[type=range]:disabled{opacity:.3}
 .slider-val{font-family:var(--mono);font-size:10px;color:var(--neon-cyan);width:36px;text-align:right;flex-shrink:0;text-shadow:0 0 6px rgba(0,243,255,.3)}
 .export-btn{height:34px;padding:0 14px;border-radius:3px;background:transparent;border:1px solid var(--neon-lime);color:var(--neon-lime);font-size:10px;font-weight:700;font-family:var(--mono);cursor:pointer;transition:all .13s;flex-shrink:0;letter-spacing:1.5px;text-transform:uppercase;text-shadow:0 0 8px rgba(177,240,0,.5)}
 .export-btn:hover{background:rgba(177,240,0,.1);box-shadow:0 0 14px rgba(177,240,0,.2)}
+.help-btn{position:absolute;top:10px;right:12px;width:28px;height:28px;border-radius:50%;border:1px solid rgba(0,243,255,.3);background:rgba(0,243,255,.06);color:rgba(0,243,255,.7);font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;z-index:10;font-family:Georgia,serif}
+.help-btn:hover{background:rgba(0,243,255,.15);border-color:rgba(0,243,255,.7);color:#fff;box-shadow:0 0 12px rgba(0,243,255,.3)}
+#help-modal{position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px}
+#help-modal.hidden{display:none}
+.help-box{background:#0e1117;border:1px solid rgba(0,243,255,.2);border-radius:8px;width:100%;max-width:640px;max-height:88vh;overflow-y:auto;padding:24px 28px;position:relative;color:var(--fg)}
+.help-box h2{font-family:var(--mono);font-size:13px;letter-spacing:3px;color:var(--accent);text-transform:uppercase;margin:0 0 20px;border-bottom:1px solid rgba(0,243,255,.15);padding-bottom:12px}
+.help-box h3{font-family:var(--mono);font-size:11px;letter-spacing:2px;color:var(--neon-yellow);text-transform:uppercase;margin:20px 0 10px}
+.help-box p,.help-box li{font-size:12px;line-height:1.7;color:rgba(255,255,255,.75);margin:4px 0}
+.help-box ul{padding-left:18px;margin:6px 0}
+.help-box .key{display:inline-block;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.2);border-radius:3px;padding:1px 6px;font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.9)}
+.help-close{position:absolute;top:14px;right:16px;background:none;border:none;color:rgba(255,255,255,.5);font-size:20px;cursor:pointer;line-height:1;padding:0}
+.help-close:hover{color:#fff}
+.help-tab-bar{display:flex;gap:8px;margin-bottom:20px}
+.help-tab{padding:6px 14px;border-radius:3px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:rgba(255,255,255,.5);font-family:var(--mono);font-size:10px;letter-spacing:1.5px;cursor:pointer;text-transform:uppercase;transition:all .13s}
+.help-tab.active{border-color:var(--accent);color:var(--accent);background:rgba(0,243,255,.08)}
+.help-tab-content{display:block}
+.help-tab-content.hidden{display:none!important}
 
 /* note list bar */
 .note-list-bar{display:flex;gap:5px;padding:.35rem .75rem;overflow-x:auto;flex-shrink:0;background:rgba(0,0,0,.6);border-bottom:1px solid rgba(0,243,255,.08);-webkit-overflow-scrolling:touch;scrollbar-width:none}
@@ -174,6 +191,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
   <div class="brand">
     <h1>PITCH<em>ME</em></h1>
     <p>vocal pitch correction · PitchMe</p>
+    <button class="help-btn" id="help-btn-rec" title="עזרה" style="position:static;margin-top:8px;width:auto;border-radius:20px;padding:0 14px;font-size:11px;font-family:var(--mono);letter-spacing:1px;height:24px">? עזרה</button>
   </div>
   <div class="rec-card">
     <div class="lbl">Record</div>
@@ -225,6 +243,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
 
   <div class="transport">
     <button class="bypass-btn" id="bypass-btn" data-tip="Bypass">BYPASS</button>
+    <button class="help-btn" id="help-btn-ed" title="Help" style="position:relative;top:auto;right:auto;margin-left:4px">?</button>
     <button class="t-btn" id="undo-btn" data-tip="Undo" disabled>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
     </button>
@@ -1569,8 +1588,22 @@ function playAudio(){
 
   sourceNode=pCtx.createBufferSource();
   sourceNode.buffer=pbuf;
+
+  // Build reverb graph inside _playCtx
   if(_reverbMix>0&&_reverbTime>0){
-    sourceNode.connect(pCtx.destination);
+    _playDryGain=pCtx.createGain();
+    _playDryGain.gain.value=1-_reverbMix*0.5;
+    _playWetGain=pCtx.createGain();
+    _playWetGain.gain.value=_reverbMix;
+    const convolver=pCtx.createConvolver();
+    convolver.normalize=true;
+    const rt60=0.3+_reverbTime*2.7;
+    convolver.buffer=buildReverbIR(rt60, pCtx.sampleRate);
+    sourceNode.connect(_playDryGain);
+    sourceNode.connect(convolver);
+    convolver.connect(_playWetGain);
+    _playDryGain.connect(pCtx.destination);
+    _playWetGain.connect(pCtx.destination);
   } else {
     sourceNode.connect(pCtx.destination);
   }
@@ -2849,9 +2882,9 @@ function applyNoiseReduction(srcBuffer, amount){
 
   // High-shelf boost to compensate NR's HF rolloff.
   // High frequencies have lower SNR → get suppressed more.
-  // Boost bins above ~4kHz proportionally to NR amount.
-  const shelfBin  = Math.round(4000/(sr/FFT));
-  const shelfGain = 1.0 + amount*0.6; // up to +60% at Nyquist
+  // Boost bins above ~3kHz proportionally to NR amount.
+  const shelfBin  = Math.round(3000/(sr/FFT));
+  const shelfGain = 1.0 + amount*1.4; // up to +140% at Nyquist — stronger compensation
 
   for(let ch=0;ch<srcBuffer.numberOfChannels;ch++){
     const src=srcBuffer.getChannelData(ch);
@@ -2909,6 +2942,8 @@ let _reverbTime=0;
 let _reverbMix=0;
 let _reverbNode=null;   // ConvolverNode
 let _dryGain=null;      // dry signal gain
+let _playDryGain=null;  // live dry gain in _playCtx
+let _playWetGain=null;  // live wet gain in _playCtx
 let _wetGain=null;      // wet signal gain
 let _masterGain=null;   // master output
 
@@ -3060,7 +3095,13 @@ makeCustomSlider(
   (v)=>{
     _reverbMix=v;
     reverbMixSlider.value=Math.round(v*100);
-    if(originalBuffer){rebuildCorrectedBuffer();drawEditor();}
+    // Real-time update: if playing and gains exist, update them immediately
+    if(_playDryGain && _playWetGain && isPlaying){
+      _playDryGain.gain.setTargetAtTime(1-v*0.5, _playCtx.currentTime, 0.02);
+      _playWetGain.gain.setTargetAtTime(v,        _playCtx.currentTime, 0.02);
+    } else if(originalBuffer){
+      rebuildCorrectedBuffer().then(()=>drawEditor());
+    }
   }
 );
 // ══ PSOLA PITCH SHIFTER ════════════════════════════════════════
@@ -3223,6 +3264,10 @@ function psolaCorr(seg,n,e0,lag){
   return c/Math.sqrt(e0*Math.max(e1,1e-10));
 }
 
+// Per-sample variable-rate Hermite resample for vibrato reduction
+// src: input samples, ratioArray: per-sample pitch ratio, outLen: output length
+// Small ratios (vibrato ±50 cents) → Hermite is transparent quality
+
 async function rebuildCorrectedBuffer(){
   if(!originalBuffer)return;
   correctedBuffer=cloneBuffer(originalBuffer);
@@ -3241,9 +3286,32 @@ async function rebuildCorrectedBuffer(){
     const segLen=end-start;
     if(segLen<128) continue;
     const constRatio=Math.pow(2,n.tuneOffset/12);
+    const hasVib=(n.vibratoReduction||0)>0;
     const seg0=originalBuffer.getChannelData(0).slice(start,end);
+    // Use OfflineAudioContext (native sinc) for all pitch shifts including vibrato.
+    // Vibrato reduction: compute average ratio including vibrato correction,
+    // apply as a constant shift. Not perfect vibrato removal but clean sound.
+    let jobRatio = constRatio;
+    if(hasVib){
+      const vAmt=(n.vibratoReduction||0)/100;
+      const src0tmp=originalBuffer.getChannelData(0);
+      const WIN=1024,HOP_TMP=256;
+      const ptmp=[];
+      for(let i=start;i+WIN<end;i+=HOP_TMP){
+        const sl=src0tmp.slice(i,i+WIN);
+        const{freq,rms}=detectPitch(sl,sr);
+        if(freq>0&&rms>0.003) ptmp.push(f2midi(freq));
+      }
+      if(ptmp.length>=3){
+        const avgM=ptmp.reduce((s,v)=>s+v,0)/ptmp.length;
+        // Blend toward the note's target midi with vAmt strength
+        const targetMidi=n.midiOrig+n.tuneOffset;
+        const blendedMidi=avgM*(1-vAmt)+targetMidi*vAmt;
+        jobRatio=Math.pow(2,(blendedMidi-n.midiOrig)/12)*constRatio;
+      }
+    }
     shiftJobs.push(
-      pitchShiftAsync(seg0, constRatio, segLen, sr)
+      pitchShiftAsync(seg0, jobRatio, segLen, sr)
         .then(shifted=>({n, start, end, segLen, shifted}))
     );
   }
@@ -3294,9 +3362,8 @@ async function rebuildCorrectedBuffer(){
 
     // Get pre-rendered shift result from Promise.all above
     const _job = shiftMap.get(n);
-    if(!_job){ continue; } // no shift needed (shouldn't happen here)
+        if(!_job){ continue; }
     const shifted0 = _job.shifted;
-
     for(let ch=0;ch<originalBuffer.numberOfChannels;ch++){
       const src=originalBuffer.getChannelData(ch);
       const dst=correctedBuffer.getChannelData(ch);
@@ -3373,6 +3440,33 @@ function askFilename(defaultName){
 }
 
 // ══ EXPORT ═══════════════════════════════════════════════════
+// ══ HELP MODAL ═══════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded',function(){
+  const modal = document.getElementById('help-modal');
+  const closeBtn = document.getElementById('help-close');
+
+  function openHelp(){ modal.classList.remove('hidden'); }
+  function closeHelp(){ modal.classList.add('hidden'); }
+
+  const btnRec = document.getElementById('help-btn-rec');
+  const btnEd  = document.getElementById('help-btn-ed');
+  if(btnRec) btnRec.onclick = openHelp;
+  if(btnEd)  btnEd.onclick  = openHelp;
+  closeBtn.onclick = closeHelp;
+  modal.addEventListener('click', e=>{ if(e.target===modal) closeHelp(); });
+  document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeHelp(); });
+
+  // Tabs
+  document.querySelectorAll('.help-tab').forEach(tab=>{
+    tab.onclick=()=>{
+      document.querySelectorAll('.help-tab').forEach(t=>t.classList.remove('active'));
+      document.querySelectorAll('.help-tab-content').forEach(c=>c.classList.add('hidden'));
+      tab.classList.add('active');
+      document.getElementById('htab-'+tab.dataset.tab).classList.remove('hidden');
+    };
+  });
+});
+
 document.getElementById('export-btn').onclick=async()=>{
   const buf=bypassMode?originalBuffer:correctedBuffer;
   if(!buf)return;
@@ -3640,5 +3734,105 @@ window.addEventListener('resize',()=>{
   }
 });
 </script>
+
+<!-- ══ HELP MODAL ════════════════════════════════════════════ -->
+<div id="help-modal" class="hidden">
+  <div class="help-box">
+    <button class="help-close" id="help-close">×</button>
+    <h2>PitchMe — מדריך שימוש</h2>
+
+    <div class="help-tab-bar">
+      <button class="help-tab active" data-tab="import">ייבוא והקלטה</button>
+      <button class="help-tab" data-tab="edit">עריכה</button>
+      <button class="help-tab" data-tab="export">ייצוא</button>
+    </div>
+
+    <!-- TAB: IMPORT -->
+    <div class="help-tab-content" id="htab-import" dir="rtl">
+      <h3>הקלטה</h3>
+      <ul>
+        <li>לחץ על <strong>העיגול האדום</strong> להתחלת הקלטה מהמיקרופון.</li>
+        <li>לחץ שוב לסיום — האפליקציה תנתח את גובה הצליל ותפתח את מסך העריכה.</li>
+      </ul>
+      <h3>ייבוא קובץ</h3>
+      <ul>
+        <li><strong>Import Audio File</strong> — תומך ב-MP3, WAV, M4A, AIFF ועוד.</li>
+        <li><strong>Upload Video File</strong> — מחלץ את פסקול האודיו מקבצי MP4, MOV וכד'.</li>
+      </ul>
+    </div>
+
+    <!-- TAB: EDIT -->
+    <div class="help-tab-content hidden" id="htab-edit" dir="rtl">
+
+      <h3>פקדי שורת הכלים העליונה</h3>
+      <ul>
+        <li><strong>BYPASS</strong> — מעבר בין האודיו המתוקן למקורי לצורך השוואה.</li>
+        <li><strong><svg width="14" height="14" style="vertical-align:middle;margin-left:2px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke- stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg> Undo</strong> — ביטול הפעולה האחרונה. גם <span class="key">⌘Z</span> / <span class="key">Ctrl+Z</span>.</li>
+        <li><strong><svg width="14" height="14" style="vertical-align:middle;margin-left:2px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke- stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg> Reset All</strong> — מאפס את כל תיקוני גובה הצליל.</li>
+        <li><strong><svg width="14" height="14" style="vertical-align:middle;margin-left:2px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke- stroke-linecap="round" stroke-linejoin="round"><polyline points="11,17 6,12 11,7"/><polyline points="18,17 13,12 18,7"/></svg> Return to Playhead</strong> — חזרה לנקודת הנגינה האחרונה בעת לחיצת Play.</li>
+        <li><strong><svg width="14" height="14" style="vertical-align:middle;margin-left:2px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke- stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg> Zoom Recall</strong> — איפוס מרחק התצוגה לברירת המחדל.</li>
+        <li><strong><svg width="14" height="14" style="vertical-align:middle;margin-left:2px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke- stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/><circle cx="9" cy="12" r="2.5" fill="currentColor" stroke="none"/></svg> Snap All</strong> — נעילת כל הצלילים לטון הקרוב ביותר בסולם.</li>
+        <li><strong><svg width="14" height="14" style="vertical-align:middle;margin-left:2px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke- stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/><rect x="2" y="2"   rx="3" stroke- opacity=".4"/></svg> / <svg width="14" height="14" style="vertical-align:middle;margin-left:2px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke- stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/><rect x="2" y="2"   rx="3" stroke- opacity=".4"/></svg> Zoom Vertical</strong> — הגדלה/הקטנה של גובה השורות בפיאנו רול.</li>
+      </ul>
+
+      <h3>פיאנו רול</h3>
+      <ul>
+        <li>כל בלוק הוא צליל מזוהה. <strong>הקו הצהוב</strong> מציג את גובה הצליל הנוכחי.</li>
+        <li><strong>גרור צליל למעלה/מטה</strong> — תיקון גובה הצליל בזמן אמת.</li>
+        <li><strong>לחץ על צליל</strong> — בחירתו ופתיחת פאנל הפקדים.</li>
+        <li><strong>גרור על מספר צלילים</strong> — בחירה מרובה.</li>
+        <li><span class="key">Space</span> — נגינה / עצירה.</li>
+        <li><strong>גלגלת עכבר</strong> — הגדלה/הקטנה אופקית.</li>
+      </ul>
+
+      <h3>פאנל צליל בודד</h3>
+      <ul>
+        <li><strong>−1st / +1st</strong> — הזזת גובה הצליל בחצי טון.</li>
+        <li><strong>− / +</strong> (Vibrato) — הפחתה/הגברת ויברטו.</li>
+        <li><strong>SNAP</strong> — נעילה לטון הקרוב.</li>
+        <li><strong>SPLIT</strong> — פיצול הצליל לשניים בנקודת הנגינה הנוכחית.</li>
+        <li><strong>DELETE</strong> — מחיקת הצליל (לא ייתוקן).</li>
+        <li><strong>✕</strong> — סגירת הפאנל.</li>
+      </ul>
+
+      <h3>פאנל בחירה מרובה</h3>
+      <ul>
+        <li><strong>−1st / +1st</strong> — הזזת כל הנבחרים בחצי טון.</li>
+        <li><strong>− / +</strong> (Vibrato) — כוונון ויברטו לכולם יחד.</li>
+        <li><strong>SNAP</strong> — נעילת כל הנבחרים לטון הקרוב.</li>
+        <li><strong>MERGE</strong> — מיזוג צלילים סמוכים לצליל אחד.</li>
+        <li><strong>DELETE</strong> — מחיקת כל הנבחרים.</li>
+        <li><strong>✕</strong> — ביטול הבחירה.</li>
+      </ul>
+
+      <h3>פאנל תחתון — עיבוד</h3>
+      <ul>
+        <li><strong>NR</strong> (Noise Reduction) — הפחתת רעש רקע. ערכים גבוהים מנקים יותר אך עלולים להשפיע על הגוון.</li>
+        <li><strong>RT</strong> (Reverb Time) — אורך ה"זנב" של הריוורב. שינוי דורש לחיצת Play מחדש.</li>
+        <li><strong>RMX</strong> (Reverb Mix) — יחס wet/dry. מגיב בזמן אמת גם בזמן נגינה.</li>
+      </ul>
+    </div>
+
+    <!-- TAB: EXPORT -->
+    <div class="help-tab-content hidden" id="htab-export" dir="rtl">
+      <h3>ייצוא אודיו</h3>
+      <ul>
+        <li>לחץ <strong>↓ Export Audio</strong> להורדת הקובץ המתוקן בפורמט WAV.</li>
+        <li>הקובץ כולל את כל תיקוני הגובה, ניקוי הרעש והריוורב.</li>
+      </ul>
+      <h3>ייצוא סרטון</h3>
+      <ul>
+        <li>אם ייבאת סרטון, <strong>🎬 Export Video</strong> מחליף את פסקול האודיו המקורי בגרסה המתוקנת.</li>
+        <li>הסרטון המקורי חייב להישאר טעון בסשן לצורך הייצוא.</li>
+      </ul>
+      <h3>טיפים</h3>
+      <ul>
+        <li>השתמש ב-<strong>BYPASS</strong> להשוואת לפני/אחרי לפני הייצוא.</li>
+        <li>תיקונים של עד ±טון אחד נשמעים הכי טבעיים.</li>
+        <li>לתוצאה טובה: החל NR לפני תיקוני גובה הצליל.</li>
+      </ul>
+    </div>
+  </div>
+</div>
 </body>
 </html>
