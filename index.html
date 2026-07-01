@@ -1589,7 +1589,7 @@ function preloadPlayBuf(buf){
 
 function playAudio(){
   if(!audioCtx||(!originalBuffer&&!correctedBuffer))return;
-  const buf=bypassMode?originalBuffer:correctedBuffer;
+    const buf=bypassMode?originalBuffer:correctedBuffer;
   if(playOffset>=buf.duration) playOffset=Math.max(0, buf.duration-0.01);
   lastPlayStart=playOffset;
   if(sourceNode){try{sourceNode.disconnect();sourceNode.stop();}catch(e){}}
@@ -1630,6 +1630,10 @@ function playAudio(){
     sourceNode.connect(pCtx.destination);
   }
   playStartTime=pCtx.currentTime;
+  // Start RAF first so playhead draws immediately without waiting for next frame
+  isPlaying=true;
+  cancelAnimationFrame(rafId);
+  rafId=requestAnimationFrame(drawEditor);
   sourceNode.start(0,playOffset);
   sourceNode.onended=()=>{
     if(!isPlaying) return;
@@ -1641,10 +1645,7 @@ function playAudio(){
     document.getElementById('ph-time').textContent=fmtTime(playOffset);
     drawEditor();
   };
-  isPlaying=true;
-  
-  cancelAnimationFrame(rafId);
-  rafId=requestAnimationFrame(drawEditor);
+
 }
 
 function pauseAudio(){
